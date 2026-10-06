@@ -1,0 +1,5 @@
+node_modules
+dist
+.env
+tests/e2e/shots
+tests/e2e/files

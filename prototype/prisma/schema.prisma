@@ -1,0 +1,738 @@
+// G Amplify Case OS: PostgreSQL schema.
+// Field names mirror src/domain/types.ts one-to-one, so the same domain code runs on the server and in the browser.
+// Timestamps are ISO-8601 text ("2026-10-03T09:15:00.000Z") and calendar dates are "YYYY-MM-DD"; both sort correctly as text.
+// Nested value objects that are always read with their parent (checklist, waiting record, ARM info, import summary) are JSON.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id    String       @id
+  name  String
+  role  String // System Owner | G Amplify Lead | Operator | Claim Reviewer | Admin
+  cases ArtistCase[]
+
+  @@map("users")
+}
+
+/// One real-world artist. Never one row per song or per spelling.
+model ArtistCase {
+  id                     String   @id // permanent case ID, C0001
+  canonicalName          String
+  aliases                String[]
+  backendProfileIds      String[] // backend artist IDs, A001
+  profileUrls            String[]
+  roles                  String[]
+  language               String?
+  identityStatus         String // Verified | Provisional | Under Review
+  identityEvidence       String?
+  // The four separate status fields (spec §18)
+  lifecycleStage         String
+  workReason             String
+  contactPreference      String
+  contactPreferenceUntil String?
+  previousStage          String?
+  stageReason            String
+  stageSince             String
+  ownerId                String?
+  owner                  User?    @relation(fields: [ownerId], references: [id])
+  nextAction             String?
+  nextActionDate         String?
+  firstSeen              String
+  lastSeen               String
+  lastEvidenceChange     String?
+  lastEvidenceNote       String?
+  firstSeenBatchId       String?
+  lastSeenBatchId        String?
+  claimStatus            String
+  activationStatus       String
+  priority               String
+  priorityScore          Int
+  mergedIntoId           String?
+  closedReason           String?
+  waiting                Json? // blocker, routes tested, coverage, future trigger, next review date
+  checklist              Json // 8-step research checklist
+  arm                    Json? // relationship owner, interests, language, support needs, next participation check
+  discoveryStatus        String   @default("Not started") // separate from the lifecycle stage
+  discoveryUpdatedAt     String?
+  verifiedProfileCount   Int      @default(0)
+  // v2: artist vs collaborator, identity status (NEW | PENDING | SEARCHING | NEEDS_REVIEW | REOPENED | VERIFIED | REJECTED)
+  // and the Goongoonalo status (PENDING | GOONGOONALO | REJECTED | DO_NOT_CONTACT); history in status_events
+  kind                   String   @default("Artist")
+  artistStatus           String   @default("NEW")
+  artistStatusAt         String?
+  firstVerifiedAt        String?
+  manualVerifiedAt       String?
+  manualVerifiedBy       String?
+  rejectedAt             String?
+  rejectedReason         String?
+  reopen                 Json? // why the artist was reopened (reasons with kind and time); null when reviewed
+  goongoonaloStatus      String   @default("PENDING")
+  goongoonaloStatusAt    String?
+  goongoonaloStatusBy    String?
+  createdAt              String
+  updatedAt              String
+
+  credits          Credit[]
+  contacts         Contact[]
+  routes           Route[]
+  research         ResearchActivity[]
+  attempts         ContactAttempt[]
+  tasks            Task[]
+  claimEvents      ClaimEvent[]
+  activationEvents ActivationEvent[]
+  reopens          ReopenEvent[]
+  profiles         ArtistProfile[]
+  verifiedProfiles VerifiedProfile[]
+  statusEvents     StatusEvent[]
+
+  @@index([lifecycleStage])
+  @@index([discoveryStatus])
+  @@index([ownerId])
+  @@index([artistStatus])
+  @@index([goongoonaloStatus])
+  @@index([kind])
+  @@index([canonicalName])
+  @@map("artist_cases")
+}
+
+/// v2: every identity-status and Goongoonalo-status change, with who, when and why (weekly / monthly numbers come from here).
+model StatusEvent {
+  id         String     @id
+  caseId     String
+  artistCase ArtistCase @relation(fields: [caseId], references: [id])
+  kind       String // identity | goongoonalo
+  from       String?
+  to         String
+  at         String
+  by         String
+  reason     String?
+
+  @@index([caseId])
+  @@index([kind, to, at])
+  @@map("status_events")
+}
+
+model ImportBatch {
+  id               String      @id // B001
+  originalFilename String
+  source           String
+  format           String
+  exportDate       String
+  uploadDate       String
+  uploaderId       String
+  importType       String // Full | Incremental
+  checksum         String // SHA-256 of the uploaded bytes: repeat detection
+  version          Int
+  versionOfId      String? // corrected file: earlier batch it replaces (history kept)
+  repeatOfId       String?
+  rowCount         Int
+  acceptedCount    Int
+  quarantinedCount Int
+  skippedCount     Int
+  status           String // Processed | Repeat | Failed
+  summary          Json
+  createdAt        String
+  rows             ImportRow[]
+
+  @@index([checksum])
+  @@map("import_batches")
+}
+
+model ImportRow {
+  id              String      @id
+  batchId         String
+  batch           ImportBatch @relation(fields: [batchId], references: [id])
+  rowNumber       Int
+  raw             Json?
+  status          String // Accepted | Quarantined | Skipped
+  classification  String?
+  reason          String?
+  ownerId         String?
+  exceptionStatus String? // Open | Resolved | Dismissed (quarantined rows)
+  resolution      String?
+  resolvedAt      String?
+  caseIds         String[]
+  trackId         String?
+  mapped          Json? // v2: the row as the importer understood it (field → value), next to the raw row
+
+  @@index([batchId])
+  @@index([trackId])
+  @@map("import_rows")
+}
+
+model Release {
+  id               String  @id
+  backendReleaseId String  @unique
+  title            String
+  firstSeen        String
+  tracks           Track[]
+
+  @@map("releases")
+}
+
+model Track {
+  id             String   @id
+  backendTrackId String   @unique
+  releaseId      String?
+  release        Release? @relation(fields: [releaseId], references: [id])
+  title          String
+  version        String
+  isrc           String
+  label          String
+  distributor    String
+  language       String
+  releaseDate    String
+  source         String
+  flags          String[]
+  sig            String // fingerprint of the last imported row: unchanged rows are skipped
+  firstSeen      String
+  lastSeen       String
+  firstBatchId   String
+  lastBatchId    String
+  history        Json // field-level changes per batch
+  credits        Credit[]
+  routes         Route[]
+
+  @@index([isrc])
+  @@map("tracks")
+}
+
+/// Who did what on a song. One song can credit many people; one person can hold several roles.
+model Credit {
+  id              String      @id
+  trackId         String
+  track           Track       @relation(fields: [trackId], references: [id])
+  caseId          String?
+  artistCase      ArtistCase? @relation(fields: [caseId], references: [id])
+  personName      String
+  personBackendId String?
+  role            String // Singer | Performer | Composer | Lyricist | Producer | Other
+  isPrimary       Boolean
+  source          String
+  sourceVersion   String // batch that first reported the credit
+  firstSeen       String
+  lastSeen        String
+  status          String // Active | Superseded (corrected files never delete history)
+  statusReason    String?
+
+  @@index([trackId])
+  @@index([caseId])
+  @@map("credits")
+}
+
+model IdentityConflict {
+  id         String   @id
+  caseIds    String[]
+  kind       String
+  reason     String
+  status     String // Open | Decided | Deferred
+  createdAt  String
+  createdBy  String
+  decisionId String?
+
+  @@map("identity_conflicts")
+}
+
+/// Same Person / Keep Separate / Defer, with a snapshot so a merge can be reversed.
+model IdentityDecision {
+  id            String   @id
+  conflictId    String
+  caseIds       String[]
+  decision      String
+  canonicalId   String?
+  reviewerId    String
+  date          String
+  reason        String
+  evidence      String
+  added         Json?
+  snapshot      Json?
+  reversedAt    String?
+  reversedBy    String?
+  reverseReason String?
+
+  @@map("identity_decisions")
+}
+
+/// Verified contact directory: artists, collaborators, managers and organisations.
+model Contact {
+  id                String      @id
+  personName        String
+  caseId            String?
+  artistCase        ArtistCase? @relation(fields: [caseId], references: [id])
+  organisation      String?
+  role              String
+  channel           String
+  value             String
+  authorityEvidence String
+  verified          Boolean
+  verifiedById      String?
+  verifiedAt        String?
+  willingIntroducer Boolean
+  source            String
+  createdAt         String
+  routes            Route[]
+
+  @@map("contacts")
+}
+
+/// Artist -> song -> collaborator/organisation -> verified contact.
+model Route {
+  id                 String           @id
+  targetCaseId       String
+  target             ArtistCase       @relation(fields: [targetCaseId], references: [id])
+  trackId            String?
+  track              Track?           @relation(fields: [trackId], references: [id])
+  collaboratorName   String?
+  collaboratorCaseId String?
+  organisation       String?
+  contactId          String?
+  contact            Contact?         @relation(fields: [contactId], references: [id])
+  sourceUrl          String?
+  evidence           String
+  confidence         Int
+  state              String // Candidate | Verified | Selected | Rejected | Exhausted
+  ranking            Int
+  lastChecked        String?
+  rejectionReason    String?
+  ownerId            String?
+  origin             String
+  path               Json? // multi-hop path from Find connection
+  pathId             String?
+  createdAt          String
+  attempts           ContactAttempt[]
+
+  @@index([targetCaseId])
+  @@map("routes")
+}
+
+model ResearchActivity {
+  id            String     @id
+  caseId        String
+  artistCase    ArtistCase @relation(fields: [caseId], references: [id])
+  source        String
+  query         String
+  url           String
+  result        String
+  evidence      String
+  confidence    Int
+  researcherId  String
+  date          String
+  minutes       Int
+  checklistStep Int?
+
+  @@index([caseId])
+  @@map("research_activities")
+}
+
+model ContactAttempt {
+  id             String     @id
+  caseId         String
+  artistCase     ArtistCase @relation(fields: [caseId], references: [id])
+  routeId        String?
+  route          Route?     @relation(fields: [routeId], references: [id])
+  date           String
+  channel        String
+  recipient      String
+  message        String
+  result         String
+  evidence       String
+  nextAction     String
+  nextActionDate String?
+  ownerId        String
+
+  @@index([caseId])
+  @@map("contact_attempts")
+}
+
+model Task {
+  id             String     @id
+  caseId         String
+  artistCase     ArtistCase @relation(fields: [caseId], references: [id])
+  ownerId        String?
+  kind           String
+  step           String
+  trigger        String
+  why            String
+  evidenceChange String?
+  dueDate        String
+  priority       String
+  status         String // Queued | In Progress | Waiting | Completed | Cancelled
+  workReason     String
+  action         String?
+  channel        String?
+  recipient      String?
+  result         String?
+  evidence       String[]
+  notes          Json
+  nextAction     String?
+  focusedMinutes Int
+  createdAt      String
+  startedAt      String?
+  completedAt    String?
+  createdBy      String
+
+  @@index([caseId])
+  @@index([ownerId, status])
+  @@map("tasks")
+}
+
+model ClaimEvent {
+  id             String     @id
+  caseId         String
+  artistCase     ArtistCase @relation(fields: [caseId], references: [id])
+  type           String
+  date           String
+  profileId      String?
+  claimRequestId String?
+  recipient      String?
+  reviewerId     String?
+  notes          String
+  evidence       String
+  actorId        String
+  source         String // User | Import
+
+  @@index([caseId])
+  @@map("claim_events")
+}
+
+model ActivationEvent {
+  id              String     @id
+  caseId          String
+  artistCase      ArtistCase @relation(fields: [caseId], references: [id])
+  type            String
+  date            String
+  feature         String?
+  expectedOutcome String?
+  operatorId      String?
+  agreedDate      String?
+  backendRef      String?
+  evidence        String
+  result          String?
+  actorId         String
+
+  @@index([caseId])
+  @@map("activation_events")
+}
+
+/// Why a waiting case came back: the evidence, the route and the task it produced.
+model ReopenEvent {
+  id         String     @id
+  caseId     String
+  artistCase ArtistCase @relation(fields: [caseId], references: [id])
+  date       String
+  oldStage   String
+  newStage   String
+  evidence   String
+  why        String
+  routeId    String?
+  taskId     String?
+  batchId    String?
+  contactId  String?
+  ownerId    String?
+
+  @@index([caseId])
+  @@map("reopen_events")
+}
+
+/// Append-only audit trail of every meaningful change.
+model AuditEvent {
+  id       String  @id
+  at       String
+  userId   String
+  caseId   String?
+  entity   String
+  entityId String
+  action   String
+  field    String?
+  from     String?
+  to       String?
+  reason   String?
+  evidence String?
+  result   String?
+  next     String?
+
+  @@index([caseId])
+  @@index([at])
+  @@map("audit_events")
+}
+
+model Notification {
+  id     String  @id
+  type   String
+  text   String
+  caseId String?
+  at     String
+  read   Boolean
+
+  @@map("notifications")
+}
+
+/// Workspace settings and ID sequences.
+model Meta {
+  id    String @id
+  value String
+
+  @@map("meta")
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Automated artist discovery: software searches, a person verifies, the system remembers.
+
+/// A credited person met during discovery. Linked to their artist case when one exists.
+model Collaborator {
+  id          String   @id
+  key         String   @unique
+  name        String
+  caseId      String?
+  status      String // Linked case | Candidate
+  roles       String[]
+  songs       String[]
+  firstJobId  String
+  lastJobId   String
+  firstSeenAt String
+  lastSeenAt  String
+
+  @@map("collaborators")
+}
+
+/// A public profile that may belong to an artist: one row per artist and normalized URL. Decided by a person.
+model ArtistProfile {
+  id                 String      @id
+  caseId             String?
+  artistCase         ArtistCase? @relation(fields: [caseId], references: [id])
+  collaboratorId     String?
+  platform           String
+  url                String
+  normalizedUrl      String
+  displayName        String
+  username           String?
+  title              String
+  description        String
+  location           String?
+  language           String?
+  links              String[]
+  tracks             Json
+  followers          Int?
+  source             String
+  foundVia           Json // every provider + query that found it
+  discoveryStatus    String // FOUND | NOT_FOUND (never invalidated automatically)
+  verificationStatus String // UNREVIEWED | VERIFIED | REJECTED | DEFERRED | REPLACED
+  evidenceScore      Int // discovery evidence score, not an identity confidence
+  strength           String // STRONG | POSSIBLE | WEAK
+  matched            String[]
+  conflicts          String[]
+  matchedSongs       String[]
+  otherCaseId        String?
+  groupKey           String?
+  groupLabel         String?
+  changeOfProfileId  String?
+  scoreAtReview      Int?
+  firstJobId         String
+  lastJobId          String
+  lastVersion        Int
+  discoveredAt       String
+  lastCheckedAt      String
+  reviewedAt         String?
+  reviewedBy         String?
+  reviewNote         String?
+  verifiedAt         String?
+  verifiedBy         String?
+  rejectionReason    String?
+  demo               Boolean
+
+  @@index([caseId])
+  @@index([normalizedUrl])
+  @@map("artist_profiles")
+}
+
+/// Permanent verified knowledge reused by future imports.
+model VerifiedProfile {
+  id                 String     @id
+  caseId             String
+  artistCase         ArtistCase @relation(fields: [caseId], references: [id])
+  profileId          String?
+  platform           String
+  url                String
+  username           String?
+  displayName        String
+  verificationStatus String // VERIFIED | REPLACED
+  verifiedBy         String
+  verifiedAt         String
+  lastCheckedAt      String
+  source             String
+  evidence           String
+  replacedBy         String?
+
+  @@index([caseId])
+  @@map("verified_profiles")
+}
+
+/// One background search for one artist. Versions are kept (v1, v2 ...).
+model DiscoveryJob {
+  id              String   @id
+  caseId          String
+  version         Int
+  mode            String // full | refresh | targeted
+  status          String // QUEUED | SEARCHING | PROCESSING | COMPLETED | FAILED | NEEDS_REVIEW | CANCELLED
+  trigger         String
+  focus           String[]
+  focusTrackIds   String[]
+  bulkId          String?
+  requestedBy     String
+  demo            Boolean
+  step            Int
+  steps           Json
+  providers       Json
+  queryCount      Int
+  cachedCount     Int
+  resultCount     Int
+  profileCount    Int
+  newProfileCount Int
+  groupCount      Int
+  pathCount       Int
+  outcome         String?
+  failureReason   String?
+  attempt         Int
+  retryOf         String?
+  createdAt       String
+  startedAt       String?
+  finishedAt      String?
+  durationMs      Int?
+
+  @@index([caseId])
+  @@index([status])
+  @@index([bulkId])
+  @@map("discovery_jobs")
+}
+
+model DiscoveryQuery {
+  id          String  @id
+  jobId       String
+  caseId      String
+  provider    String
+  query       String
+  kind        String
+  subject     String
+  status      String // ok | failed | cached | skipped
+  resultCount Int
+  cacheKey    String // provider + normalized query: repeated searches reuse the stored results
+  error       String?
+  ranAt       String
+
+  @@index([jobId])
+  @@index([cacheKey])
+  @@map("discovery_queries")
+}
+
+/// Raw search hits: history and cache.
+model DiscoveryResult {
+  id            String  @id
+  caseId        String
+  jobId         String
+  queryId       String
+  version       Int
+  provider      String
+  query         String
+  url           String
+  normalizedUrl String
+  platform      String
+  title         String
+  snippet       String
+  displayName   String?
+  username      String?
+  structured    Json?
+  profileId     String?
+  demo          Boolean
+  discoveredAt  String
+
+  @@index([queryId])
+  @@index([profileId])
+  @@map("discovery_results")
+}
+
+model DiscoveryEvidence {
+  id        String  @id
+  caseId    String?
+  profileId String
+  jobId     String
+  version   Int
+  kind      String
+  polarity  String // match | conflict
+  detail    String
+  weight    Int
+  sourceUrl String?
+  createdAt String
+
+  @@index([profileId])
+  @@map("discovery_evidence")
+}
+
+model GraphNode {
+  id        String  @id // case:C0001, song:TR000001, label:..., profile:PF0001, contact:CT0001, route:RT0001
+  type      String
+  label     String
+  refId     String?
+  sub       String?
+  url       String?
+  createdAt String
+
+  @@map("graph_nodes")
+}
+
+/// One relationship with its source and status (verified by a person / discovered with a source / possible).
+model GraphEdge {
+  id           String  @id
+  key          String  @unique // deterministic: repeated imports never duplicate an edge
+  sourceId     String
+  targetId     String
+  type         String
+  label        String
+  evidence     String
+  source       String
+  sourceUrl    String?
+  sourceType   String
+  status       String
+  active       Boolean
+  confidence   Int
+  discoveredAt String
+  verifiedAt   String?
+  verifiedBy   String?
+
+  @@index([sourceId])
+  @@index([targetId])
+  @@map("graph_edges")
+}
+
+/// A possible connection path found by Find connection. A person turns it into a route, or rejects it.
+model ConnectionPath {
+  id              String   @id
+  caseId          String
+  signature       String
+  steps           Json
+  targetType      String
+  targetContactId String?
+  targetProfileId String?
+  edgeCount       Int
+  score           Int
+  strength        String
+  evidence        String[]
+  status          String // SUGGESTED | ROUTE_CREATED | REJECTED
+  routeId         String?
+  foundAt         String
+  lastFoundAt     String
+  foundBy         String
+  decidedAt       String?
+  decidedBy       String?
+  reason          String?
+  note            String?
+
+  @@index([caseId])
+  @@map("connection_paths")
+}

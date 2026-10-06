@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: gamplify-db
+    environment:
+      POSTGRES_USER: gamplify
+      POSTGRES_PASSWORD: gamplify
+      POSTGRES_DB: gamplify
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - gamplify-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gamplify -d gamplify"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  gamplify-db: {}
