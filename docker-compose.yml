@@ -1,0 +1,29 @@
+# ArtistFinder: the web app (nginx) and the API (Node + Prisma) on your PostgreSQL database (DATABASE_URL in .env).
+#   docker compose up --build      then open http://localhost:8080 (APP_PORT in .env changes the port)
+name: artistfinder
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: production
+      PORT: "4000"
+    expose:
+      - "4000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      backend:
+        condition: service_started
+    ports:
+      - "${APP_PORT:-8080}:80"
+    restart: unless-stopped

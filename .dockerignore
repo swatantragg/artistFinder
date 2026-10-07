@@ -1,0 +1,13 @@
+# Only backend/ and frontend/ sources go into the images. Never send data, secrets or the old prototype.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+!**/.env.example
+.git
+Docs
+prototype
+**/backups
+**/*.dump
+**/*.tar.gz
+**/*.log

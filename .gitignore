@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.log
+# Real data and backups never go into git
+Docs/
+backups/
+*.dump
+*.tar.gz
