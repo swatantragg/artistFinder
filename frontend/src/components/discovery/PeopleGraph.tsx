@@ -1,5 +1,6 @@
 // Connection graph: the artist in the middle and the people credited on the artist's songs around it. Each card says how
 // they are connected: a shared song and their role on it (e.g. “Dil Ka Safar” · Composer). Click a card for every song.
+import { matchesText } from '@domain/search';
 import { Background, Controls, Handle, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type Node, type NodeProps } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { ArrowRight, BadgeCheck, Search, Star, User } from 'lucide-react';
@@ -54,8 +55,8 @@ function Graph({ caseId, height }: { caseId: string; height: number }) {
   const [sel, setSel] = useState<string | null>(null);
   const flow = useReactFlow();
   const theme = typeof document !== 'undefined' ? (document.documentElement.dataset.theme as 'light' | 'dark' | undefined) ?? 'system' : 'system';
-  const needle = q.trim().toLowerCase();
-  const matching = useMemo(() => (data?.people ?? []).filter(p => !needle || p.name.toLowerCase().includes(needle) || p.songs.some(s => s.title.toLowerCase().includes(needle))), [data, needle]);
+  const needle = q.trim();
+  const matching = useMemo(() => (data?.people ?? []).filter(p => !needle || matchesText(needle, p.name, ...p.songs.map(s => s.title))), [data, needle]);
   const shown = all || needle ? matching : matching.slice(0, FIRST);
   const { nodes, edges } = useMemo(() => {
     if (!data) return { nodes: [] as Node[], edges: [] as Edge[] };

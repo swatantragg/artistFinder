@@ -5,14 +5,15 @@ import {
 } from './constants';
 import type { Model } from './model';
 import { can, openTasks, stageIndex, userName, viewUser, visibleRole } from './ops';
-import type { ArtistCase, Ctx, ImportRow, Route, Task } from './types';
-import { addDays, daysBetween, nameKey } from './util';
+import type { ArtistCase, Ctx, ImportRow, Route, Task, Track } from './types';
+import { bestTier, matchTier, sameId, searchKey, searchQuery, TIER } from './search';
+import { addDays, daysBetween, nameKey, normIsrc } from './util';
 import { ACTIVE_JOB_STATUSES, contactLabel } from './constants';
-import { searchBlocked } from './discovery/pipeline';
+import { personalLimit, searchBlocked } from './discovery/pipeline';
 import { discoveryViews, staleDaysOf } from './discovery/views';
 import { ARTIST_STATUS_INFO, GOONGOONALO_INFO } from './constants';
 import { isVerified, reopenReasons } from './status';
-import { actionFor, collaboratorCount, v2Views } from './views';
+import { actionFor, artistAggregates, collaboratorCount, searchArtists, v2Views } from './views';
 import { relevantOpen } from './discovery/relevance';
 
 // ------------------------------------------------------------------ cached aggregates (recomputed when the model changes)
@@ -168,7 +169,7 @@ export const queries = {
         goongoonaloPending: m.all('cases').filter(c => !c.mergedIntoId && !c.rejectedAt && isVerified(c) && c.goongoonaloStatus === 'PENDING').length,
       },
       permissions: Object.fromEntries(['import', 'identityDecision', 'reviewClaim', 'verifyBackendClaim', 'closeCase', 'reassign', 'resolveException', 'bulkDiscovery', 'discoverySettings', 'manageUsers', 'managePasswords', 'resetWorkspace'].map(p => [p, can(m, ctx.userId, p)])),
-      discoveryBlocked: searchBlocked(m, ctx) ?? ctx.searchBudget?.exhausted ?? null,
+      discoveryBlocked: searchBlocked(m, ctx) ?? ctx.searchBudget?.exhausted ?? personalLimit(m, ctx) ?? null,
     };
   },
 
@@ -215,7 +216,7 @@ export const queries = {
   listCases(m: Model, ctx: Ctx, f: CaseFilters = {}) {
     const songs = songCounts(m);
     const reopenedIds = new Set(m.all('reopens').map(r => r.caseId));
-    const q = nameKey(f.q ?? '');
+    const q = searchQuery(f.q);
     const ids = f.ids ? new Set(f.ids) : null;
     let rows = live(m).filter(c => {
       if (ids && !ids.has(c.id)) return false;
@@ -225,7 +226,7 @@ export const queries = {
       if (f.priority && c.priority !== f.priority) return false;
       if (f.discovery && c.discoveryStatus !== f.discovery) return false;
       if (f.ownerId) { const want = f.ownerId === 'me' ? ctx.userId : f.ownerId === 'none' ? null : f.ownerId; if (c.ownerId !== want) return false; }
-      if (q && !(c.id.toLowerCase() === q || c.backendProfileIds.some(b => b.toLowerCase() === q) || [c.canonicalName, ...c.aliases].some(n => nameKey(n).includes(q)))) return false;
+      if (q.key && !(sameId(q, c.id) || c.backendProfileIds.some(b => sameId(q, b)) || bestTier(q, [c.canonicalName, ...c.aliases]))) return false;
       if (f.view === 'reopened' && !reopenedIds.has(c.id)) return false;
       return true;
     }).map(c => caseRow(m, c, ctx.today, songs, reopenedIds));
@@ -297,7 +298,7 @@ export const queries = {
         c.lastEvidenceNote ? `Latest evidence: ${c.lastEvidenceNote}` : null,
       ].filter(Boolean),
       openTasks: tasks,
-      actions: caseActions(m, c, ctx.userId, searchBlocked(m, ctx) ?? ctx.searchBudget?.exhausted ?? null),
+      actions: caseActions(m, c, ctx.userId, searchBlocked(m, ctx) ?? ctx.searchBudget?.exhausted ?? personalLimit(m, ctx) ?? null),
       conflicts: m.all('conflicts').filter(x => x.status !== 'Decided' && x.caseIds.includes(c.id)),
       mergedInto: c.mergedIntoId ? { id: c.mergedIntoId, name: m.get('cases', c.mergedIntoId)?.canonicalName ?? '' } : null,
       mergedChildren: (m.idx.mergedChildren.get(c.id) ?? []).map(id => ({ id, name: m.get('cases', id)!.canonicalName, backendIds: m.get('cases', id)!.backendProfileIds })),
@@ -604,39 +605,53 @@ export const queries = {
       identityConflicts: m.all('conflicts').filter(c => c.status !== 'Decided').length, oldestUnresolvedDays: Math.max(0, ...cases.filter(c => ['Unresearched', 'Researching', 'Waiting for Evidence', 'Identity Review'].includes(c.lifecycleStage)).map(age)),
     };
   },
-  auditLog(m: Model, _ctx: Ctx, p: { userId?: string; action?: string; q?: string; from?: string; to?: string; page?: number; pageSize?: number; meaningful?: boolean } = {}) {
-    const q = nameKey(p.q ?? '');
+  auditLog(m: Model, ctx: Ctx, p: { userId?: string; action?: string; q?: string; from?: string; to?: string; page?: number; pageSize?: number; meaningful?: boolean } = {}) {
+    const q = searchQuery(p.q);
     let list = m.all('audit');
     if (p.meaningful) list = list.filter(e => !['Task created', 'Case created from import', 'Checklist step', 'Alias added from import'].some(x => e.action.startsWith(x)));
     if (p.userId) list = list.filter(e => e.userId === p.userId);
     if (p.action) list = list.filter(e => e.action === p.action);
     if (p.from) list = list.filter(e => e.at.slice(0, 10) >= p.from!);
     if (p.to) list = list.filter(e => e.at.slice(0, 10) <= p.to!);
-    if (q) list = list.filter(e => (e.caseId && (e.caseId.toLowerCase() === q || nameKey(m.get('cases', e.caseId)?.canonicalName ?? '').includes(q))) || nameKey(`${e.action} ${e.to ?? ''} ${e.reason ?? ''}`).includes(q));
+    if (q.key) list = list.filter(e => (e.caseId && (sameId(q, e.caseId) || matchTier(q, m.get('cases', e.caseId)?.canonicalName, { similar: false }))) || bestTier(q, [e.action, e.to, e.reason, userName(m, e.userId)], { similar: false }));
     list.sort((a, b) => b.at.localeCompare(a.at) || b.id.localeCompare(a.id));
     const size = p.pageSize ?? 50, page = Math.max(1, p.page ?? 1);
-    return { rows: list.slice((page - 1) * size, page * size).map(e => ({ ...e, userName: userName(m, e.userId), caseName: e.caseId ? m.get('cases', e.caseId)?.canonicalName ?? e.caseId : null })), total: list.length, page, pageSize: size, actions: [...new Set(m.all('audit').map(e => e.action))].sort() };
+    // The System Owner shows as Admin to everyone else, in the history too.
+    const owner = m.get('users', ctx.userId)?.role === 'System Owner';
+    const role = (v: string | null) => (!owner && v === 'System Owner' ? 'Admin' : v);
+    return { rows: list.slice((page - 1) * size, page * size).map(e => ({ ...e, from: role(e.from), to: role(e.to), userName: userName(m, e.userId), caseName: e.caseId ? m.get('cases', e.caseId)?.canonicalName ?? e.caseId : null })), total: list.length, page, pageSize: size, actions: [...new Set(m.all('audit').map(e => e.action))].sort() };
   },
+  /**
+   * The top search bar. Case, spaces and punctuation never matter; best matches first: artists (ID, exact name, name
+   * starting with the text, a word starting with it, containing it, all words, similar spelling, then aliases and
+   * profiles), then songs (ID, ISRC, title), contacts, tasks and routes.
+   */
   search(m: Model, _ctx: Ctx, p: { q: string }) {
-    const q = nameKey(p.q ?? '');
-    if (q.length < 2) return [];
+    const q = searchQuery(p.q);
+    if (q.key.length < 2) return [];
     const out: { type: string; id: string; caseId: string | null; label: string; sub: string }[] = [];
-    for (const c of live(m)) {
-      if (out.length > 40) break;
-      if (c.id.toLowerCase() === q || c.backendProfileIds.some(b => b.toLowerCase() === q) || [c.canonicalName, ...c.aliases].some(n => nameKey(n).includes(q))) out.push({ type: 'Artist', id: c.id, caseId: c.id, label: c.canonicalName, sub: `${c.backendProfileIds[0] ?? c.id} · ${c.lifecycleStage}` });
+    const { songs: songCount } = artistAggregates(m);
+    const artists = [...searchArtists(m, p.q, { catalogue: false })].map(([id, hit]) => ({ c: m.get('cases', id)!, hit })).filter(x => x.c)
+      .sort((a, b) => a.hit.rank - b.hit.rank || (songCount.get(b.c.id) ?? 0) - (songCount.get(a.c.id) ?? 0) || a.c.canonicalName.localeCompare(b.c.canonicalName));
+    for (const { c, hit } of artists.slice(0, 15)) {
+      out.push({ type: 'Artist', id: c.id, caseId: c.id, label: c.canonicalName, sub: [c.backendProfileIds[0] ?? c.id, `${songCount.get(c.id) ?? 0} songs`, hit.why && hit.why !== 'ID' ? hit.why : c.lifecycleStage].filter(Boolean).join(' · ') });
     }
-    let songs = 0;
+    const isrc = normIsrc(p.q);
+    const songHits: { t: Track; tier: number }[] = [];
     for (const t of m.data.tracks.values()) {
-      if (songs >= 8) break;
-      if (nameKey(t.title).includes(q) || t.backendTrackId.toLowerCase() === q || t.isrc.toLowerCase() === q) {
-        const primary = m.creditsOfTrack(t.id).find(cr => cr.isPrimary && cr.caseId);
-        out.push({ type: 'Song', id: t.id, caseId: primary?.caseId ? m.canonical(primary.caseId) : null, label: t.title, sub: `${t.backendTrackId}${t.isrc ? ` · ${t.isrc}` : ''}${primary ? ` · ${primary.personName}` : ''}` });
-        songs++;
-      }
+      const exactId = sameId(q, t.backendTrackId) || (isrc.length >= 10 && t.isrc === isrc);
+      const tier = exactId ? 0 : matchTier(q, t.title, { similar: false });
+      if (exactId || (tier && (q.key.length >= 3 || tier === TIER.EXACT))) songHits.push({ t, tier });
     }
-    for (const k of m.all('contacts')) if (nameKey(`${k.personName} ${k.value}`).includes(q)) out.push({ type: 'Contact', id: k.id, caseId: k.caseId, label: k.personName, sub: `${k.channel} · ${k.verified ? 'verified' : 'unverified'}` });
-    for (const t of m.all('tasks')) if (t.id.toLowerCase() === q || (q.length > 3 && nameKey(t.step).includes(q) && openTask(t))) out.push({ type: 'Task', id: t.id, caseId: t.caseId, label: `${t.id} ${t.step}`, sub: `${m.get('cases', t.caseId)?.canonicalName ?? ''} · ${t.status}` });
-    for (const r of m.all('routes')) if (r.id.toLowerCase() === q) out.push({ type: 'Route', id: r.id, caseId: r.targetCaseId, label: r.id, sub: routeView(m, r).chain.map(x => x.label).join(' → ') });
+    songHits.sort((a, b) => a.tier - b.tier || a.t.title.localeCompare(b.t.title));
+    for (const { t } of songHits.slice(0, 10)) {
+      const primary = m.creditsOfTrack(t.id).find(cr => cr.isPrimary && cr.caseId);
+      out.push({ type: 'Song', id: t.id, caseId: primary?.caseId ? m.canonical(primary.caseId) : null, label: t.title, sub: `${t.backendTrackId}${t.isrc ? ` · ${t.isrc}` : ''}${primary ? ` · ${primary.personName}` : ''}` });
+    }
+    const contacts = m.all('contacts').map(k => ({ k, tier: bestTier(q, [k.personName], { similar: false }) || (searchKey(k.value).includes(q.key) ? TIER.CONTAINS : 0) })).filter(x => x.tier).sort((a, b) => a.tier - b.tier);
+    for (const { k } of contacts.slice(0, 8)) out.push({ type: 'Contact', id: k.id, caseId: k.caseId, label: k.personName, sub: `${k.channel} · ${k.verified ? 'verified' : 'unverified'}` });
+    for (const t of m.all('tasks')) if (sameId(q, t.id) || (q.key.length > 3 && openTask(t) && matchTier(q, t.step, { similar: false }))) out.push({ type: 'Task', id: t.id, caseId: t.caseId, label: `${t.id} ${t.step}`, sub: `${m.get('cases', t.caseId)?.canonicalName ?? ''} · ${t.status}` });
+    for (const r of m.all('routes')) if (sameId(q, r.id)) out.push({ type: 'Route', id: r.id, caseId: r.targetCaseId, label: r.id, sub: routeView(m, r).chain.map(x => x.label).join(' → ') });
     return out.slice(0, 60);
   },
   notifications(m: Model) {
@@ -646,8 +661,9 @@ export const queries = {
   ...discoveryViews,
   ...v2Views,
   caseOptions(m: Model, _ctx: Ctx, p: { q: string }) {
-    const q = nameKey(p.q ?? '');
-    return live(m).filter(c => !q || nameKey(c.canonicalName).includes(q) || c.id.toLowerCase() === q || c.backendProfileIds.some(b => b.toLowerCase() === q)).slice(0, 20).map(c => ({ id: c.id, name: c.canonicalName, artistId: c.backendProfileIds[0] ?? '', stage: c.lifecycleStage }));
+    const q = searchQuery(p.q);
+    const found = q.key ? searchArtists(m, p.q, { catalogue: false }) : null;
+    return live(m).filter(c => !found || found.has(c.id)).sort((a, b) => (found?.get(a.id)?.rank ?? 0) - (found?.get(b.id)?.rank ?? 0) || a.canonicalName.localeCompare(b.canonicalName)).slice(0, 20).map(c => ({ id: c.id, name: c.canonicalName, artistId: c.backendProfileIds[0] ?? '', stage: c.lifecycleStage }));
   },
 };
 export type Queries = typeof queries;

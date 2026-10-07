@@ -1,11 +1,12 @@
 // Read models for discovery screens: the discovery queue, one artist's discovery (candidates, evidence, history),
 // the connection graph, live job progress and the artists named in an import file.
+import { matchTier, sameId, searchQuery } from '../search';
 import { ACTIVE_JOB_STATUSES, DISCOVERY_CASE_STATUSES, STRENGTH_LABEL, type DiscoveryStrength } from '../constants';
 import { caseGraph } from '../graph';
 import type { Model } from '../model';
 import { userName } from '../ops';
 import type { ArtistProfile, ConnectionPath, Ctx, DiscoveryJob, QueryKind } from '../types';
-import { daysBetween, nameKey } from '../util';
+import { daysBetween } from '../util';
 import { bulkCandidates } from './commands';
 import { outcomeText, searchBlocked } from './pipeline';
 import { buildFacts } from './queries';
@@ -139,9 +140,9 @@ export const discoveryViews = {
     const kpis = Object.fromEntries(DISCOVERY_CASE_STATUSES.map(s => [s, 0])) as Record<string, number>;
     for (const c of live) kpis[c.discoveryStatus] = (kpis[c.discoveryStatus] ?? 0) + 1;
     const profiles = m.all('profiles');
-    const q = nameKey(p.q ?? '');
+    const q = searchQuery(p.q);
     const order: Record<string, number> = { Searching: 0, Queued: 1, 'Needs verification': 2, Failed: 3, Verified: 4, 'No candidate': 5, 'Not started': 6 };
-    let rows = live.filter(c => (!p.status || (p.status === 'Stale' ? staleCases.has(c.id) : c.discoveryStatus === p.status)) && (!q || nameKey(c.canonicalName).includes(q) || c.backendProfileIds.some(b => b.toLowerCase() === q) || c.id.toLowerCase() === q));
+    let rows = live.filter(c => (!p.status || (p.status === 'Stale' ? staleCases.has(c.id) : c.discoveryStatus === p.status)) && (!q.key || !!matchTier(q, c.canonicalName) || c.backendProfileIds.some(b => sameId(q, b)) || sameId(q, c.id)));
     rows.sort((a, b) => (order[a.discoveryStatus] ?? 9) - (order[b.discoveryStatus] ?? 9) || (b.discoveryUpdatedAt ?? '').localeCompare(a.discoveryUpdatedAt ?? '') || a.canonicalName.localeCompare(b.canonicalName));
     const total = rows.length, pageSize = p.pageSize ?? 25, page = Math.max(1, p.page ?? 1);
     rows = rows.slice((page - 1) * pageSize, page * pageSize);

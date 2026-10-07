@@ -6,10 +6,12 @@ import type { Model } from './model';
 import { userName } from './ops';
 import { isVerified, reopenReasons } from './status';
 import type { ArtistCase, Ctx } from './types';
+import { matchTier, sameId, searchKey, searchQuery, TIER } from './search';
 import { addDays, nameKey, normIsrc } from './util';
 
 // ------------------------------------------------------------------ cached aggregates
 const cache = new WeakMap<Model, { v: number; songs: Map<string, number>; jobs: Map<string, string | null> }>();
+export function artistAggregates(m: Model) { return aggregates(m); }
 function aggregates(m: Model) {
   const hit = cache.get(m);
   if (hit && hit.v === m.version) return hit;
@@ -43,32 +45,50 @@ export function collaboratorCount(m: Model, caseId: string): number {
  * Artist name or alias, Artist ID or backend ID, ISRC, song title, album, label, profile URL or platform username.
  * Returns the matching artists with what matched (shown under the name).
  */
-export function searchArtists(m: Model, raw: string): Map<string, string> {
-  const q = nameKey(raw).replace(/^@/, '');
-  const out = new Map<string, string>();
-  if (!q) return out;
-  const hit = (caseId: string | null | undefined, why: string) => { if (!caseId) return; const id = m.canonical(caseId); if (!out.has(id)) out.set(id, why); };
-  const viaTrack = (tid: string, why: string) => { for (const cr of m.creditsOfTrack(tid)) if (cr.caseId && cr.status === 'Active') hit(cr.caseId, why); };
+export interface ArtistHit { why: string; rank: number }
+/**
+ * Find artists by ID, name, alias, ISRC, profile, song, album or label. Case, spaces and punctuation never matter
+ * (search.ts). Each artist gets its best match: rank 0 = an ID or ISRC, 1-6 = the name (exact … similar spelling),
+ * 11-16 = an alias, 20 = a profile, 31+ = a song, 41+ = an album, 51+ = a label. `catalogue: false` skips songs, albums
+ * and labels (the top search bar lists songs on their own).
+ */
+export function searchArtists(m: Model, raw: string, opts: { catalogue?: boolean } = {}): Map<string, ArtistHit> {
+  const q = searchQuery(raw);
+  const out = new Map<string, ArtistHit>();
+  if (!q.key) return out;
+  const hit = (caseId: string | null | undefined, why: string, rank: number) => {
+    if (!caseId) return;
+    const id = m.canonical(caseId);
+    const cur = out.get(id);
+    if (!cur || rank < cur.rank) out.set(id, { why, rank });
+  };
+  const viaTrack = (tid: string, why: string, rank: number) => { for (const cr of m.creditsOfTrack(tid)) if (cr.caseId && cr.status === 'Active') hit(cr.caseId, why, rank); };
   for (const c of m.data.cases.values()) {
     if (c.mergedIntoId) continue;
-    if (c.id.toLowerCase() === q || c.backendProfileIds.some(b => b.toLowerCase() === q)) hit(c.id, 'ID');
-    else if (nameKey(c.canonicalName).includes(q)) hit(c.id, '');
-    else { const a = c.aliases.find(x => nameKey(x).includes(q)); if (a) hit(c.id, `Alias: ${a}`); }
+    if (sameId(q, c.id) || c.backendProfileIds.some(b => sameId(q, b))) { hit(c.id, 'ID', 0); continue; }
+    const t = matchTier(q, c.canonicalName);
+    if (t) { hit(c.id, '', t); if (t === TIER.EXACT) continue; }
+    for (const a of c.aliases) { const at = matchTier(q, a); if (at) hit(c.id, `Alias: ${a}`, 10 + at); }
   }
   const isrc = normIsrc(raw);
-  if (isrc.length >= 10) { const tid = m.idx.trackByIsrc.get(isrc); if (tid) viaTrack(tid, `ISRC ${isrc}`); }
-  if (q.length >= 3) {
-    const releases = new Set<string>();
-    for (const r of m.data.releases.values()) if (nameKey(r.title).includes(q)) releases.add(r.id);
-    let n = 0;
-    for (const t of m.data.tracks.values()) {
-      if (n > 400) break;
-      if (nameKey(t.title).includes(q)) { viaTrack(t.id, `Song: ${t.title}`); n++; }
-      else if (t.releaseId && releases.has(t.releaseId)) { viaTrack(t.id, `Album: ${m.get('releases', t.releaseId)?.title ?? ''}`); n++; }
-      else if (t.label && nameKey(t.label).includes(q)) { viaTrack(t.id, `Label: ${t.label}`); n++; }
+  if (isrc.length >= 10) { const tid = m.idx.trackByIsrc.get(isrc); if (tid) viaTrack(tid, `ISRC ${isrc}`, 0); }
+  if (q.key.length >= 3) {
+    for (const p of m.data.profiles.values()) if (p.caseId && (searchKey(p.normalizedUrl).includes(q.key) || (p.username && matchTier(q, p.username, { similar: false })))) hit(p.caseId, `Profile: ${p.platform}${p.username ? ` @${p.username}` : ''}`, 20);
+    for (const u of m.data.cases.values()) if (!u.mergedIntoId && u.profileUrls.some(x => searchKey(x).includes(q.key))) hit(u.id, 'Profile link', 20);
+    if (opts.catalogue !== false) {
+      const releases = new Map<string, number>();
+      for (const r of m.data.releases.values()) { const t = matchTier(q, r.title, { similar: false }); if (t) releases.set(r.id, t); }
+      let n = 0;
+      for (const t of m.data.tracks.values()) {
+        if (n > 600) break;
+        const st = matchTier(q, t.title, { similar: false });
+        if (st) { viaTrack(t.id, `Song: ${t.title}`, 30 + st); n++; continue; }
+        const rt = t.releaseId ? releases.get(t.releaseId) : 0;
+        if (rt) { viaTrack(t.id, `Album: ${m.get('releases', t.releaseId!)?.title ?? ''}`, 40 + rt); n++; continue; }
+        const lt = t.label ? matchTier(q, t.label, { similar: false }) : 0;
+        if (lt) { viaTrack(t.id, `Label: ${t.label}`, 50 + lt); n++; }
+      }
     }
-    for (const p of m.data.profiles.values()) if (p.caseId && (p.normalizedUrl.includes(q) || (p.username ?? '').toLowerCase().includes(q))) hit(p.caseId, `Profile: ${p.platform}${p.username ? ` @${p.username}` : ''}`);
-    for (const u of m.data.cases.values()) if (!u.mergedIntoId && u.profileUrls.some(x => x.toLowerCase().includes(q))) hit(u.id, 'Profile link');
   }
   return out;
 }
@@ -119,8 +139,7 @@ export const v2Views = {
     // What needs a person first: candidates to review, reopened artists, running searches, new artists … then most songs.
     const ATTENTION: Record<ArtistStatus, number> = { NEEDS_REVIEW: 0, REOPENED: 1, SEARCHING: 2, NEW: 3, PENDING: 4, VERIFIED: 5, REJECTED: 6 };
     // Best match first: the ID, the exact name, a name containing the words, an alias or ISRC, a profile, then songs/albums/labels.
-    const q = f.q ? nameKey(f.q) : '';
-    const rank = (c: ArtistCase) => { const why = found?.get(c.id) ?? ''; return why === 'ID' ? 0 : why === '' ? (nameKey(c.canonicalName) === q ? 1 : 2) : /^(Alias|ISRC)/.test(why) ? 3 : /^Profile/.test(why) ? 4 : 5; };
+    const rank = (c: ArtistCase) => found?.get(c.id)?.rank ?? 99;
     if (key === 'match') list.sort((a, b) => rank(a) - rank(b) || (songs.get(b.id) ?? 0) - (songs.get(a.id) ?? 0) || a.id.localeCompare(b.id));
     else if (key === 'attention') list.sort((a, b) => ATTENTION[a.artistStatus] - ATTENTION[b.artistStatus] || (songs.get(b.id) ?? 0) - (songs.get(a.id) ?? 0) || a.canonicalName.localeCompare(b.canonicalName));
     else list.sort((a, b) => {
@@ -136,7 +155,7 @@ export const v2Views = {
       return d * dir || a.id.localeCompare(b.id);
     });
     const pageSize = Math.min(100, f.pageSize ?? 25), page = Math.max(1, f.page ?? 1);
-    const rows = list.slice((page - 1) * pageSize, page * pageSize).map(c => ({ ...artistRow(m, c, songs, jobs, found?.get(c.id) || null), collaborators: collaboratorCount(m, c.id) }));
+    const rows = list.slice((page - 1) * pageSize, page * pageSize).map(c => ({ ...artistRow(m, c, songs, jobs, found?.get(c.id)?.why || null), collaborators: collaboratorCount(m, c.id) }));
     const kinds = { Artist: 0, Collaborator: 0 };
     for (const c of live(m)) if (!found || found.has(c.id)) kinds[c.kind]++;
     return { rows, total: list.length, page, pageSize, counts, kinds, statusInfo: ARTIST_STATUS_INFO };

@@ -4,7 +4,7 @@ import { commands, type CommandResult } from './commands';
 import { offProviderSet, type ProviderSet } from './discovery/providers';
 import { DEFAULT_RUNNER, DiscoveryRunner, type DiscoveryHost, type RunnerOptions } from './discovery/runner';
 import { searchBudget, usageOf } from './discovery/budget';
-import { ENGINE_USER, searchBlocked } from './discovery/pipeline';
+import { ENGINE_USER, perPersonDaily, searchBlocked } from './discovery/pipeline';
 import { IMPORT_STEPS, processImport, type ImportInput, type ProgressFn, type StepFn } from './importer';
 import { decodeText, parseDelimited } from './importmap';
 import { staleDaysOf } from './discovery/views';
@@ -133,7 +133,7 @@ export class Engine {
       mode: set.mode, notes: set.notes, providers: set.providers.map(p => ({ id: p.id, label: p.label, kind: p.kind })),
       blocked: searchBlocked(this.m, this.ctx()),
       usage: usageOf(this.m, set.providers, todayISO()), budget: searchBudget(this.m, set.providers, todayISO()),
-      staleDays: Number(this.m.getMeta('discovery.staleDays') ?? 90), running: this.runner.active,
+      staleDays: Number(this.m.getMeta('discovery.staleDays') ?? 90), perPersonDaily: perPersonDaily(this.m), running: this.runner.active,
     };
   }
 
@@ -219,11 +219,11 @@ export class Engine {
   }
 
   /** Add a person to the workspace (the account itself lives in the auth store). `by` = who added them; else they signed up. */
-  addUser(user: User, by?: string): Promise<User> {
+  addUser(user: User, by?: string, action = 'Person added'): Promise<User> {
     return this.write(by ?? null, (m, ctx) => {
       if (m.get('users', user.id)) throw new RuleError('This user already exists.');
       const u = m.insert('users', user);
-      audit(m, by ? ctx : { ...ctx, userId: user.id }, { caseId: null, entity: 'User', entityId: user.id, action: by ? 'Person added' : 'Signed up', to: user.role });
+      audit(m, by ? ctx : { ...ctx, userId: user.id }, { caseId: null, entity: 'User', entityId: user.id, action: by ? action : 'Signed up', to: user.role });
       return u;
     });
   }

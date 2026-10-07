@@ -9,7 +9,7 @@ import {
 import type { ArtistProfile, Ctx, DiscoveryJob, Route } from '../types';
 import { clean } from '../util';
 import { normalizeProfileUrl } from './normalize';
-import { maybeFinishBulk, queueJob, regroup, searchBlocked, syncDiscoveryState } from './pipeline';
+import { maybeFinishBulk, personalLimit, queueJob, regroup, searchBlocked, syncDiscoveryState } from './pipeline';
 import { clearReopen } from '../status';
 import { reviewCount } from './relevance';
 
@@ -117,7 +117,7 @@ function routeFromPath(m: Model, ctx: Ctx, pathId: string): Route {
 export const discoveryCommands: Record<string, Command> = {
   startDiscovery(m, ctx, p) {
     const c = getCase(m, p.caseId);
-    const blocked = searchBlocked(m, ctx) ?? ctx.searchBudget?.exhausted;
+    const blocked = searchBlocked(m, ctx) ?? ctx.searchBudget?.exhausted ?? personalLimit(m, ctx);
     if (blocked) throw rule(blocked);
     if (c.rejectedAt) throw rule(`${c.canonicalName} was rejected as an artist record (${c.rejectedReason}). Restore it first.`);
     const mode = p.mode === 'refresh' ? 'refresh' : 'full';
@@ -340,6 +340,8 @@ export const discoveryCommands: Record<string, Command> = {
     requirePerm(m, ctx, 'discoverySettings');
     const changes: string[] = [];
     if (p.staleDays != null) { const n = Math.round(Number(p.staleDays)); if (!(n >= 1 && n <= 3650)) throw rule('Stale threshold must be between 1 and 3650 days.'); m.setMeta('discovery.staleDays', String(n)); changes.push(`stale after ${n} days`); }
+    if (p.perPersonDaily != null) { const n = Math.round(Number(p.perPersonDaily)); if (!(n >= 0 && n <= 1000)) throw rule('Searches per person per day must be between 0 (no limit) and 1000.'); m.setMeta('discovery.perPersonDaily', String(n)); changes.push(n ? `${n} Find artist searches per person per day` : 'no daily limit per person'); }
+    if (!changes.length) throw rule('Nothing to save.');
     audit(m, ctx, { caseId: null, entity: 'Settings', entityId: 'discovery', action: 'Discovery settings changed', to: changes.join(', ') });
     return { message: `Saved: ${changes.join(', ')}.` };
   },

@@ -1,4 +1,5 @@
 // Dossier tabs about who the artist is and how to reach them: overview, songs & credits, collaborators, routes, research.
+import { matchesText } from '@domain/search';
 import { ChevronRight, ExternalLink, Plus, Search } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -90,8 +91,8 @@ export function SongsTab({ id }: { id: string }) {
   const addBtn = <Button size="sm" icon={<Plus size={15} />} onClick={() => open('addSong', { caseId: id })}>Link a song</Button>;
   if (!data) return <SkeletonRows />;
   if (!data.length) return <Empty title="No linked songs." text="Songs arrive through imports, or link one found in research." action={addBtn} />;
-  const needle = q.trim().toLowerCase();
-  const hit = (s: Song) => !needle || [s.title, s.version, s.isrc, s.album, s.label, ...s.credits.map(c => c.name)].some(x => x?.toLowerCase().includes(needle));
+  const needle = q.trim();
+  const hit = (s: Song) => !needle || matchesText(needle, s.title, s.version, s.isrc, s.album, s.label, ...s.credits.map(c => c.name));
   const list = data.filter(hit).sort((a, b) => sort === 'title' ? a.title.localeCompare(b.title) : sort === 'imported' ? 0 : (b.releaseDate || '').localeCompare(a.releaseDate || '') || a.title.localeCompare(b.title));
   const pages = Math.max(1, Math.ceil(list.length / PAGE)), cur = Math.min(page, pages);
   const shown = list.slice((cur - 1) * PAGE, cur * PAGE);

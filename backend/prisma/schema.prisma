@@ -749,16 +749,22 @@ model AuthAccount {
   passwordHash String
   createdAt    String
   lastLoginAt  String?
+  status       String  @default("active") // active | pending (self sign-up waiting for an Admin) | disabled (switched off)
+  name         String? // the name given at sign-up, until an Admin approves it
+  mfaSecret    String? // two-step sign-in (TOTP) secret, encrypted when AUTH_SECRET is set
+  mfaRecovery  String? // JSON list of SHA-256 hashes of unused recovery codes
+  mfaLastStep  Int? // last accepted 30-second step (a code works once)
 
   @@map("auth_accounts")
 }
 
 model AuthSession {
-  id        String  @id // SHA-256 of the session token (the token itself is only in the browser cookie)
-  userId    String
-  createdAt String
-  expiresAt String
-  userAgent String?
+  id         String  @id // SHA-256 of the session token (the token itself is only in the browser cookie)
+  userId     String
+  createdAt  String
+  expiresAt  String
+  userAgent  String?
+  lastSeenAt String? // sessions end after 7 days without use
 
   @@index([userId])
   @@map("auth_sessions")

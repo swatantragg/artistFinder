@@ -10,7 +10,7 @@
     "start": "node dist/server.mjs",
     "db:migrate": "node scripts/migrate.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/domain.test.ts && tsx tests/v2.test.ts && tsx tests/providers.test.ts && tsx tests/auth.test.ts",
+    "test": "tsx tests/domain.test.ts && tsx tests/v2.test.ts && tsx tests/providers.test.ts && tsx tests/auth.test.ts && tsx tests/search.test.ts",
     "postinstall": "prisma generate"
   },
   "dependencies": {

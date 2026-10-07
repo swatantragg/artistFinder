@@ -4,7 +4,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { CommandResult } from '@domain/commands';
 import type { Role } from '@domain/constants';
 import type { User } from '@domain/types';
-import type { Backend, Me } from '../api/backend';
+import { account, type Backend, type Me } from '../api/backend';
 
 export interface Meta {
   users: User[];
@@ -23,6 +23,8 @@ interface AppState {
   me: Me;
   userId: string;
   signOut(): void;
+  /** Re-read the signed-in account (e.g. after turning two-step sign-in on or off). */
+  refreshMe(): void;
   meta: Meta | null;
   rev: number;
   refresh(): void;
@@ -36,7 +38,8 @@ interface AppState {
 const Ctx = createContext<AppState | null>(null);
 export const useApp = () => { const c = useContext(Ctx); if (!c) throw new Error('useApp outside provider'); return c; };
 
-export function AppProvider({ backend, me, onSignOut, children }: { backend: Backend; me: Me; onSignOut: () => void; children: ReactNode }) {
+export function AppProvider({ backend, me: signedIn, onSignOut, children }: { backend: Backend; me: Me; onSignOut: () => void; children: ReactNode }) {
+  const [me, setMe] = useState(signedIn);
   const userId = me.id;
   const [rev, setRev] = useState(0);
   const [meta, setMeta] = useState<Meta | null>(null);
@@ -51,6 +54,7 @@ export function AppProvider({ backend, me, onSignOut, children }: { backend: Bac
   const dismiss = useCallback((id: number) => setToasts(t => t.filter(x => x.id !== id)), []);
   const refresh = useCallback(() => setRev(r => r + 1), []);
   const signOut = useCallback(() => { void backend.logout().then(onSignOut); }, [backend, onSignOut]);
+  const refreshMe = useCallback(() => { account.state().then(s => { if (s.me) setMe(s.me); }).catch(() => undefined); }, []);
 
   useEffect(() => {
     let alive = true;
@@ -71,9 +75,9 @@ export function AppProvider({ backend, me, onSignOut, children }: { backend: Bac
   }, [backend, toast]);
 
   const value = useMemo<AppState>(() => ({
-    backend, me: meta?.me ? { ...me, ...meta.me } : me, userId, signOut, meta, rev, refresh, run, toast, toasts, dismiss,
+    backend, me: meta?.me ? { ...me, ...meta.me } : me, userId, signOut, refreshMe, meta, rev, refresh, run, toast, toasts, dismiss,
     can: (perm: string) => !!meta?.permissions[perm], role: meta?.me?.role ?? me.role,
-  }), [backend, me, userId, signOut, meta, rev, refresh, run, toast, toasts, dismiss]);
+  }), [backend, me, userId, signOut, refreshMe, meta, rev, refresh, run, toast, toasts, dismiss]);
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

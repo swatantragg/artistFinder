@@ -8,9 +8,11 @@ import type { User } from '@domain/types';
 export type ImportStep = 'Uploading' | 'Validating' | 'Matching' | 'Detecting changes' | 'Updating cases' | 'Creating tasks' | 'Complete';
 export interface UploadOptions { importType: 'Full' | 'Incremental'; exportDate: string; source: string }
 export type ImportJobView = Omit<ImportJob, 'userId'>;
-export interface Me extends User { email: string }
-export interface AuthState { me: Me | null; firstAccount: boolean; signupOpen: boolean }
-export interface Person extends User { email: string | null }
+export interface Me extends User { email: string; mfa: boolean }
+export interface AuthState { me: Me | null; firstAccount: boolean; signupOpen: boolean; captchaSiteKey: string | null; passwordMin: number }
+export interface Person extends User { email: string | null; status: string; mfa: boolean; lastLoginAt: string | null }
+export interface SignupRequest { userId: string; name: string; email: string; requestedAt: string }
+export type SignupInput = { name: string; email: string; password: string; setupCode?: string; captcha?: string; website?: string };
 
 export interface Backend {
   query<T>(name: string, params: object): Promise<T>;
@@ -24,6 +26,17 @@ export interface Backend {
   addPerson(p: { name: string; email: string; password: string; role: 'Admin' | 'User' }): Promise<Person>;
   /** System Owner only: set someone's password (they are signed out everywhere). */
   setPassword(userId: string, password: string): Promise<string>;
+  /** Sign-up requests waiting for an Admin. */
+  signupRequests(): Promise<SignupRequest[]>;
+  approve(userId: string, role: 'Admin' | 'User'): Promise<string>;
+  decline(userId: string): Promise<string>;
+  /** Switch a person off (signed out, no sign-in) or back on. */
+  setActive(userId: string, active: boolean): Promise<string>;
+  /** System Owner only: turn off someone's two-step sign-in (lost phone). */
+  resetMfa(userId: string): Promise<string>;
+  mfaSetup(): Promise<{ secret: string; uri: string }>;
+  mfaEnable(code: string): Promise<{ recoveryCodes: string[] }>;
+  mfaDisable(password: string, code: string): Promise<string>;
   changePassword(current: string, next: string): Promise<string>;
   logout(): Promise<void>;
 }
@@ -50,8 +63,11 @@ async function call<T>(method: 'GET' | 'POST', url: string, body?: object): Prom
 /** Sign-in endpoints (no session needed). */
 export const account = {
   state: () => call<AuthState>('GET', '/api/auth/state'),
-  login: (email: string, password: string) => call<{ me: Me }>('POST', '/api/auth/login', { email, password }).then(r => r.me),
-  signup: (name: string, email: string, password: string) => call<{ me: Me }>('POST', '/api/auth/signup', { name, email, password }).then(r => r.me),
+  /** Signed in, or a ticket for the two-step code. */
+  login: (email: string, password: string) => call<{ me: Me } | { mfa: true; ticket: string }>('POST', '/api/auth/login', { email, password }),
+  loginCode: (ticket: string, code: string) => call<{ me: Me }>('POST', '/api/auth/login/code', { ticket, code }).then(r => r.me),
+  /** The first account is signed in at once; any other waits for an Admin's approval. */
+  signup: (input: SignupInput) => call<{ me: Me } | { pending: true; message: string }>('POST', '/api/auth/signup', input),
 };
 
 class ServerBackend implements Backend {
@@ -70,6 +86,14 @@ class ServerBackend implements Backend {
   people() { return this.guard(call<Person[]>('GET', '/api/people')); }
   async addPerson(p: { name: string; email: string; password: string; role: 'Admin' | 'User' }) { return (await this.post<{ person: Person }>('/api/people', p)).person; }
   async setPassword(userId: string, password: string) { return (await this.post<{ message: string }>(`/api/people/${encodeURIComponent(userId)}/password`, { password })).message; }
+  signupRequests() { return this.guard(call<SignupRequest[]>('GET', '/api/people/pending')); }
+  async approve(userId: string, role: 'Admin' | 'User') { return (await this.post<{ message: string }>(`/api/people/${encodeURIComponent(userId)}/approve`, { role })).message; }
+  async decline(userId: string) { return (await this.post<{ message: string }>(`/api/people/${encodeURIComponent(userId)}/decline`, {})).message; }
+  async setActive(userId: string, active: boolean) { return (await this.post<{ message: string }>(`/api/people/${encodeURIComponent(userId)}/active`, { active })).message; }
+  async resetMfa(userId: string) { return (await this.post<{ message: string }>(`/api/people/${encodeURIComponent(userId)}/mfa/reset`, {})).message; }
+  mfaSetup() { return this.post<{ secret: string; uri: string }>('/api/account/mfa/setup', {}); }
+  mfaEnable(code: string) { return this.post<{ recoveryCodes: string[] }>('/api/account/mfa/enable', { code }); }
+  async mfaDisable(password: string, code: string) { return (await this.post<{ message: string }>('/api/account/mfa/disable', { password, code })).message; }
   async changePassword(current: string, next: string) { return (await this.post<{ message: string }>('/api/auth/password', { current, next })).message; }
   async logout() { await call('POST', '/api/auth/logout', {}).catch(() => undefined); }
   async upload(file: { name: string; bytes: Uint8Array }, opts: UploadOptions, onJob: (j: ImportJobView) => void): Promise<ImportJobView> {

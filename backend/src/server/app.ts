@@ -3,14 +3,16 @@
 //   POST /api/command/:name   every write (validated, audited, atomic)
 //   POST /api/import          raw file upload; returns the background import job (poll GET /api/import/jobs/:id)
 //   POST /api/admin/reset     delete all data and start with an empty workspace (System Owner only; people stay)
-//   GET  /api/auth/state · POST /api/auth/signup · /login · /logout · /password   accounts and sessions (auth.ts)
-//   GET  /api/people · POST /api/people · POST /api/people/:id/password   the team (Settings → People and roles)
+//   GET  /api/auth/state · POST /api/auth/signup · /login · /login/code · /logout · /password   accounts and sessions (auth.ts)
+//   POST /api/account/mfa/setup · /enable · /disable                                   two-step sign-in
+//   GET  /api/people · /api/people/pending · POST /api/people · /:id/approve · /decline · /active · /password · /mfa/reset
+//                             the team (Settings → People and roles)
 //   POST /api/discovery/:caseId/start · GET /api/discovery/:caseId · POST /api/discovery/bulk · GET /api/discovery/config
 //                             REST shortcuts to the discovery commands and queries (jobs run in the background)
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import * as XLSX from 'xlsx';
 import { RuleError, type Engine } from '../domain/engine';
-import { can, viewUser } from '../domain/ops';
+import { can } from '../domain/ops';
 import type { Auth } from './auth';
 
 /**
@@ -33,17 +35,26 @@ export function createApi(engine: Engine, auth: Auth, opts: { reset?: () => Prom
 
   app.get('/api/health', (_req, res) => { res.json({ ok: true, mode: 'server', database: 'postgresql', discovery: engine.discoveryMode }); });
 
-  // Accounts. Sign-up and sign-in set an httpOnly session cookie; the first account is the System Owner.
+  // Accounts. Sign-in sets an httpOnly session cookie. The first account (with the owner setup code) is the System Owner;
+  // later sign-ups wait for an Admin's approval. With two-step sign-in, /login answers { mfa, ticket } and /login/code
+  // finishes it.
   app.get('/api/auth/state', async (req, res) => { res.json(await auth.state(auth.tokenOf(req))); });
   app.post('/api/auth/signup', async (req, res) => {
-    const { token, me } = await auth.signup(req.body ?? {}, req.header('user-agent'));
-    auth.setCookie(res, token);
-    res.status(201).json({ me });
+    const r = await auth.signup(req.body ?? {}, { ip: req.ip ?? '', userAgent: req.header('user-agent') });
+    if ('pending' in r) { res.status(202).json(r); return; }
+    auth.setCookie(res, r.token);
+    res.status(201).json({ me: r.me });
   });
   app.post('/api/auth/login', async (req, res) => {
-    const { token, me } = await auth.login(req.body ?? {}, req.ip ?? '', req.header('user-agent'));
-    auth.setCookie(res, token);
-    res.json({ me });
+    const r = await auth.login(req.body ?? {}, req.ip ?? '', req.header('user-agent'));
+    if ('mfa' in r) { res.json(r); return; }
+    auth.setCookie(res, r.token);
+    res.json({ me: r.me });
+  });
+  app.post('/api/auth/login/code', async (req, res) => {
+    const r = await auth.loginCode(req.body ?? {}, req.header('user-agent'));
+    auth.setCookie(res, r.token);
+    res.json({ me: r.me });
   });
   app.post('/api/auth/logout', async (req, res) => {
     await auth.logout(auth.tokenOf(req));
@@ -57,14 +68,21 @@ export function createApi(engine: Engine, auth: Auth, opts: { reset?: () => Prom
 
   app.use('/api', auth.requireUser);
 
-  // People: everyone sees the team (the System Owner shows as Admin to others); Admins add people; the owner sets passwords.
-  app.get('/api/people', async (req, res) => {
-    const people = engine.m.all('users').filter(u => u.role !== 'Automation');
-    const emails = await auth.emails(people.map(u => u.id));
-    res.json(people.map(u => ({ ...viewUser(engine.m, user(req, res), u), email: emails[u.id] ?? null })));
-  });
+  // Own account: two-step sign-in with an authenticator app.
+  app.post('/api/account/mfa/setup', async (req, res) => { res.json(await auth.mfaSetup(user(req, res))); });
+  app.post('/api/account/mfa/enable', async (req, res) => { res.json(await auth.mfaEnable(user(req, res), req.body?.code)); });
+  app.post('/api/account/mfa/disable', async (req, res) => { await auth.mfaDisable(user(req, res), req.body ?? {}); res.json({ message: 'Two-step sign-in is off.' }); });
+
+  // People: everyone sees the team (the System Owner shows as Admin to others). Admins add people, approve sign-ups and
+  // switch Users off; the System Owner also sets passwords and resets two-step sign-in.
+  app.get('/api/people', async (req, res) => { res.json(await auth.people(user(req, res))); });
+  app.get('/api/people/pending', async (req, res) => { res.json(await auth.pending(user(req, res))); });
   app.post('/api/people', async (req, res) => { res.status(201).json({ person: await auth.addPerson(user(req, res), req.body ?? {}) }); });
+  app.post('/api/people/:id/approve', async (req, res) => { res.json({ message: await auth.approve(user(req, res), String(req.params.id), req.body?.role) }); });
+  app.post('/api/people/:id/decline', async (req, res) => { res.json({ message: await auth.decline(user(req, res), String(req.params.id)) }); });
+  app.post('/api/people/:id/active', async (req, res) => { res.json({ message: await auth.setActive(user(req, res), String(req.params.id), req.body?.active === true) }); });
   app.post('/api/people/:id/password', async (req, res) => { res.json({ message: await auth.setPasswordFor(user(req, res), String(req.params.id), req.body?.password) }); });
+  app.post('/api/people/:id/mfa/reset', async (req, res) => { res.json({ message: await auth.resetMfaFor(user(req, res), String(req.params.id)) }); });
 
   app.post('/api/query/:name', (req, res) => {
     res.json(engine.query(String(req.params.name), user(req, res), req.body ?? {}));

@@ -56,7 +56,7 @@ export const handleOf = (platform: string, username: string | null | undefined):
 
 // ------------------------------------------------------------------ search budget (API usage limits from .env)
 interface Usage { id: string; label: string; perArtist: number | null; remaining: number | null; month: { used: number; limit: number; resetsOn: string } | null; day: { used: number; limit: number; resetsOn: string } | null }
-export interface DiscoveryConfigV { mode: string; notes: string[]; providers: { id: string; label: string; kind: string }[]; staleDays: number; running: number; blocked: string | null; usage: Usage[]; budget: { artists: number; exhausted: string | null } | null }
+export interface DiscoveryConfigV { mode: string; notes: string[]; providers: { id: string; label: string; kind: string }[]; staleDays: number; perPersonDaily: number; running: number; blocked: string | null; usage: Usage[]; budget: { artists: number; exhausted: string | null } | null }
 const pct = (used: number, limit: number) => Math.min(100, Math.round((used / limit) * 100));
 /** Used / limit per search API, with a bar per period; `compact` puts everything on one line. */
 export function SearchBudget({ cfg, compact }: { cfg: DiscoveryConfigV; compact?: boolean }) {

@@ -1,15 +1,16 @@
 // Reports, Audit Log and Settings.
-import { Database, KeyRound, LogOut, Moon, Sun, Monitor, Trash2, UserPlus } from 'lucide-react';
+import { Check, Database, KeyRound, LogOut, Moon, Power, ShieldCheck, Sun, Monitor, Trash2, UserPlus } from 'lucide-react';
+import QRCode from 'qrcode';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { PEOPLE_ROLES } from '@domain/constants';
 import { Timeline, type AuditRow } from '../components/case-bits';
-import { Avatar, Badge, Bars, Button, Card, DataTable, Empty, Field, Modal, PageHeader, Pagination, Segmented, Skeleton, Stat } from '../components/ui';
+import { Avatar, Badge, Bars, Button, Card, DataTable, Empty, Field, Modal, PageHeader, Pagination, Segmented, Skeleton, Stat, cx } from '../components/ui';
 import { useApp, useDebounced, useQuery } from '../lib/app';
 import type { Queries } from '@domain/queries';
 import { fmtDateTime, num } from '../lib/format';
 import { SearchBudget, type DiscoveryConfigV } from '../components/discovery/bits';
-import type { Person } from '../api/backend';
+import type { Person, SignupRequest } from '../api/backend';
 
 // ------------------------------------------------------------------ Reports
 type Rep = ReturnType<Queries['reports']>;
@@ -138,6 +139,7 @@ export function SettingsPage() {
         <div className="space-y-4">
           <PeopleCard />
           <AccountCard />
+          <TwoStepCard />
         </div>
         <div className="space-y-4">
           <DiscoverySettings />
@@ -175,43 +177,67 @@ const ROLE_TEXT: Record<string, string> = {
 function PeopleCard() {
   const app = useApp();
   const [people, setPeople] = useState<Person[] | null>(null);
+  const [requests, setRequests] = useState<SignupRequest[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [pwFor, setPwFor] = useState<Person | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const manage = app.can('manageUsers');
+  const iAmOwner = app.role === 'System Owner';
   useEffect(() => {
     let alive = true;
     app.backend.people().then(p => { if (alive) { setPeople(p); setError(null); } }).catch(e => { if (alive) setError((e as Error).message); });
+    if (manage) app.backend.signupRequests().then(r => { if (alive) setRequests(r); }).catch(() => undefined);
     return () => { alive = false; };
-  }, [app.backend, app.rev]);
-  const manage = app.can('manageUsers');
-  const iAmOwner = app.role === 'System Owner';
+  }, [app.backend, app.rev, manage]);
+  /** Run an account action, show its answer, reload the lists. */
+  const act = async (key: string, fn: () => Promise<string>) => {
+    setBusy(key);
+    try { app.toast(await fn()); app.refresh(); }
+    catch (e) { app.toast((e as Error).message, 'error'); }
+    finally { setBusy(null); }
+  };
   const roleOptions = PEOPLE_ROLES.map(r => <option key={r} value={r}>{r}</option>);
   return (
-    <Card title="People and roles" subtitle={manage ? (iAmOwner ? 'Add people, change roles and set passwords.' : 'Add people and make Users Admins.') : 'Everyone on the team. An Admin adds people and sets roles.'}
+    <Card title="People and roles" subtitle={manage ? (iAmOwner ? 'Add people, approve sign-ups, change roles, set passwords and switch people off.' : 'Add people, approve sign-ups, make Users Admins and switch Users off.') : 'Everyone on the team. An Admin adds people and sets roles.'}
       actions={manage ? <Button size="sm" variant="primary" icon={<UserPlus size={15} />} onClick={() => setAdding(true)}>Add person</Button> : undefined}>
+      {manage && requests.length > 0 && (
+        <div className="mb-3 rounded-lg border border-accent-line bg-accent-soft p-3">
+          <p className="mb-2 text-sm font-semibold text-ink">Waiting for approval · {requests.length}</p>
+          <ul className="space-y-2">
+            {requests.map(r => <SignupRequestRow key={r.userId} r={r} busy={busy} act={act} />)}
+          </ul>
+        </div>
+      )}
       {error && <p className="text-sm text-[var(--t-red)]">{error}</p>}
       {!people && !error && <Skeleton className="h-24" />}
       <ul className="divide-y divide-line">
         {people?.map(u => {
           const me = u.id === app.userId;
+          const off = u.status === 'disabled';
           const canRole = !me && manage && (iAmOwner || u.role === 'User');
+          const canSwitch = !me && manage && (iAmOwner || u.role === 'User');
           const canPw = !me && iAmOwner && !!u.email;
           return (
-            <li key={u.id} className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 py-2.5">
+            <li key={u.id} className={cx('flex flex-wrap items-center justify-between gap-x-3 gap-y-2 py-2.5', off && 'opacity-70')}>
               <span className="flex min-w-0 flex-1 items-center gap-2.5">
                 <Avatar name={u.name} />
                 <span className="min-w-0">
-                  <span className="block truncate text-sm font-medium">{u.name}</span>
-                  <span className="block truncate text-xs text-muted">{u.email ?? 'no sign-in'}</span>
+                  <span className="flex items-center gap-1.5 truncate text-sm font-medium">{u.name}{u.mfa && <span title="Two-step sign-in is on"><ShieldCheck size={14} className="text-[var(--t-green)]" /></span>}{off && <Badge tone="red">Switched off</Badge>}</span>
+                  <span className="block truncate text-xs text-muted">{u.email ?? 'no sign-in'}{u.lastLoginAt ? ` · last sign-in ${fmtDateTime(u.lastLoginAt)}` : u.email ? ' · never signed in' : ''}</span>
                 </span>
               </span>
               <span className="flex flex-wrap items-center gap-2">
-                {me ? <Badge tone="green">You · {u.role}</Badge> : canRole ? (
+                {me ? <Badge tone="green">You · {u.role}</Badge> : canRole && !off ? (
                   <span className="w-[130px]">
                     <select className="field" aria-label={`Role of ${u.name}`} value={u.role} onChange={e => { void app.run('setUserRole', { userId: u.id, role: e.target.value }); }}>{roleOptions}</select>
                   </span>
                 ) : <Badge>{u.role}</Badge>}
-                {canPw && <Button size="sm" icon={<KeyRound size={14} />} onClick={() => setPwFor(u)}>Set password</Button>}
+                {canPw && !off && <Button size="sm" icon={<KeyRound size={14} />} onClick={() => setPwFor(u)}>Set password</Button>}
+                {iAmOwner && !me && u.mfa && <Button size="sm" loading={busy === `mfa:${u.id}`} onClick={() => { if (confirm(`Turn off two-step sign-in for ${u.name}? They sign in with only their password until they turn it on again.`)) void act(`mfa:${u.id}`, () => app.backend.resetMfa(u.id)); }}>Reset two-step</Button>}
+                {canSwitch && (off
+                  ? <Button size="sm" icon={<Power size={14} />} loading={busy === `on:${u.id}`} onClick={() => void act(`on:${u.id}`, () => app.backend.setActive(u.id, true))}>Switch on</Button>
+                  : <Button size="sm" variant="danger" icon={<Power size={14} />} loading={busy === `off:${u.id}`} onClick={() => { if (confirm(`Switch ${u.name} off? They are signed out at once and cannot sign in until switched on again.`)) void act(`off:${u.id}`, () => app.backend.setActive(u.id, false)); }}>Switch off</Button>)}
               </span>
             </li>
           );
@@ -222,11 +248,29 @@ function PeopleCard() {
         <ul className="mt-2 space-y-1">
           {(iAmOwner ? ['System Owner', ...PEOPLE_ROLES] : PEOPLE_ROLES).map(r => <li key={r}><b className="text-ink-2">{r}:</b> {ROLE_TEXT[r]}</li>)}
         </ul>
-        <p className="mt-2">People who sign up themselves start as User.</p>
+        <p className="mt-2">People who ask for an account wait for an Admin’s approval.</p>
       </details>
       {adding && <AddPersonModal onClose={() => setAdding(false)} />}
       {pwFor && <SetPasswordModal person={pwFor} onClose={() => setPwFor(null)} />}
     </Card>
+  );
+}
+
+function SignupRequestRow({ r, busy, act }: { r: SignupRequest; busy: string | null; act: (key: string, fn: () => Promise<string>) => Promise<void> }) {
+  const app = useApp();
+  const [role, setRole] = useState<'Admin' | 'User'>('User');
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-surface px-3 py-2">
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-medium text-ink">{r.name}</span>
+        <span className="block truncate text-xs text-muted">{r.email} · asked {fmtDateTime(r.requestedAt)}</span>
+      </span>
+      <span className="flex flex-wrap items-center gap-2">
+        <span className="w-[110px]"><select className="field" aria-label={`Role for ${r.name}`} value={role} onChange={e => setRole(e.target.value as 'Admin' | 'User')}>{PEOPLE_ROLES.map(x => <option key={x} value={x}>{x}</option>)}</select></span>
+        <Button size="sm" variant="primary" icon={<Check size={14} />} loading={busy === `ok:${r.userId}`} onClick={() => void act(`ok:${r.userId}`, () => app.backend.approve(r.userId, role))}>Approve</Button>
+        <Button size="sm" variant="danger" loading={busy === `no:${r.userId}`} onClick={() => { if (confirm(`Decline the sign-up of ${r.name} (${r.email})?`)) void act(`no:${r.userId}`, () => app.backend.decline(r.userId)); }}>Decline</Button>
+      </span>
+    </li>
   );
 }
 
@@ -235,7 +279,7 @@ function AddPersonModal({ onClose }: { onClose: () => void }) {
   const [f, setF] = useState({ name: '', email: '', password: '', role: 'User' as 'Admin' | 'User' });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const ready = !!f.name.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim()) && f.password.length >= 8;
+  const ready = !!f.name.trim() && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(f.email.trim()) && f.password.length >= 12;
   const save = async () => {
     setBusy(true); setError(null);
     try {
@@ -250,7 +294,7 @@ function AddPersonModal({ onClose }: { onClose: () => void }) {
       <form className="grid gap-3 sm:grid-cols-2" onSubmit={e => { e.preventDefault(); if (ready) void save(); }}>
         <Field label="Name" required><input className="field" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} autoFocus maxLength={80} /></Field>
         <Field label="Email" required><input className="field" type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} autoComplete="off" /></Field>
-        <Field label="First password" required help="At least 8 characters. Share it with them."><input className="field" type="text" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} autoComplete="off" /></Field>
+        <Field label="First password" required help="At least 12 characters. Share it with them."><input className="field" type="text" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} autoComplete="off" /></Field>
         <Field label="Role" required><select className="field" value={f.role} onChange={e => setF({ ...f, role: e.target.value as 'Admin' | 'User' })}>{PEOPLE_ROLES.map(r => <option key={r} value={r}>{r}</option>)}</select></Field>
         <p className="text-xs text-muted sm:col-span-2"><b className="text-ink-2">{f.role}:</b> {ROLE_TEXT[f.role]}</p>
         {error && <p role="alert" className="text-sm text-[var(--t-red)] sm:col-span-2">{error}</p>}
@@ -272,9 +316,9 @@ function SetPasswordModal({ person, onClose }: { person: Person; onClose: () => 
   };
   return (
     <Modal open onClose={onClose} title={`Set password for ${person.name}`} description={`${person.email} is signed out everywhere and signs in with this password.`}
-      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" loading={busy} disabled={pw.next.length < 8 || pw.next !== pw.again} onClick={() => void save()}>Set password</Button></>}>
+      footer={<><Button variant="ghost" onClick={onClose}>Cancel</Button><Button variant="primary" loading={busy} disabled={pw.next.length < 12 || pw.next !== pw.again} onClick={() => void save()}>Set password</Button></>}>
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="New password" help="At least 8 characters."><input className="field" type="password" autoComplete="new-password" value={pw.next} onChange={e => setPw({ ...pw, next: e.target.value })} autoFocus /></Field>
+        <Field label="New password" help="At least 12 characters."><input className="field" type="password" autoComplete="new-password" value={pw.next} onChange={e => setPw({ ...pw, next: e.target.value })} autoFocus /></Field>
         <Field label="New password again" help={mismatch ? <span className="text-[var(--t-red)]">The passwords do not match.</span> : undefined}><input className="field" type="password" autoComplete="new-password" value={pw.again} onChange={e => setPw({ ...pw, again: e.target.value })} /></Field>
       </div>
     </Modal>
@@ -298,10 +342,83 @@ function AccountCard() {
       actions={<Button size="sm" icon={<LogOut size={15} />} onClick={app.signOut}>Sign out</Button>}>
       <form className="grid gap-3 sm:grid-cols-3" onSubmit={e => { e.preventDefault(); if (!mismatch) void save(); }}>
         <Field label="Current password"><input className="field" type="password" autoComplete="current-password" value={form.current} onChange={e => setForm(f => ({ ...f, current: e.target.value }))} /></Field>
-        <Field label="New password" help="At least 8 characters."><input className="field" type="password" autoComplete="new-password" value={form.next} onChange={e => setForm(f => ({ ...f, next: e.target.value }))} /></Field>
+        <Field label="New password" help="At least 12 characters."><input className="field" type="password" autoComplete="new-password" value={form.next} onChange={e => setForm(f => ({ ...f, next: e.target.value }))} /></Field>
         <Field label="New password again" help={mismatch ? <span className="text-[var(--t-red)]">The passwords do not match.</span> : undefined}><input className="field" type="password" autoComplete="new-password" value={form.again} onChange={e => setForm(f => ({ ...f, again: e.target.value }))} /></Field>
-        <div className="sm:col-span-3"><Button type="submit" variant="primary" loading={busy} disabled={!form.current || form.next.length < 8 || form.next !== form.again}>Change password</Button></div>
+        <div className="sm:col-span-3"><Button type="submit" variant="primary" loading={busy} disabled={!form.current || form.next.length < 12 || form.next !== form.again}>Change password</Button></div>
       </form>
+    </Card>
+  );
+}
+
+/** Two-step sign-in: a code from an authenticator app after the password, with one-time recovery codes. */
+function TwoStepCard() {
+  const app = useApp();
+  const [setup, setSetup] = useState<{ secret: string; uri: string; qr: string } | null>(null);
+  const [codes, setCodes] = useState<string[] | null>(null);
+  const [code, setCode] = useState('');
+  const [off, setOff] = useState({ open: false, password: '', code: '' });
+  const [busy, setBusy] = useState(false);
+  const on = !!app.me.mfa;
+  const start = async () => {
+    setBusy(true);
+    try {
+      const s = await app.backend.mfaSetup();
+      setSetup({ ...s, qr: await QRCode.toDataURL(s.uri, { margin: 1, width: 200 }) });
+    } catch (e) { app.toast((e as Error).message, 'error'); }
+    finally { setBusy(false); }
+  };
+  const enable = async () => {
+    setBusy(true);
+    try { const r = await app.backend.mfaEnable(code); setCodes(r.recoveryCodes); setSetup(null); setCode(''); app.refreshMe(); }
+    catch (e) { app.toast((e as Error).message, 'error'); }
+    finally { setBusy(false); }
+  };
+  const disable = async () => {
+    setBusy(true);
+    try { app.toast(await app.backend.mfaDisable(off.password, off.code)); setOff({ open: false, password: '', code: '' }); app.refreshMe(); }
+    catch (e) { app.toast((e as Error).message, 'error'); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Card title={<span className="flex items-center gap-2"><ShieldCheck size={17} className={on ? 'text-[var(--t-green)]' : 'text-muted'} />Two-step sign-in</span>}
+      subtitle={on ? 'On: signing in needs your password and a code from your authenticator app.' : 'Off. Turn it on so a stolen password alone cannot open your account.'}>
+      {codes ? (
+        <div>
+          <p className="text-sm font-semibold text-ink">Save these recovery codes now</p>
+          <p className="mt-1 text-xs text-muted">Each works once instead of an app code, e.g. when the phone is lost. They are not shown again.</p>
+          <ul className="mt-3 grid grid-cols-2 gap-2 font-mono text-sm sm:grid-cols-5">{codes.map(c => <li key={c} className="rounded-md border border-line bg-surface-2 px-2 py-1 text-center">{c}</li>)}</ul>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" onClick={() => { void navigator.clipboard?.writeText(codes.join('\n')); app.toast('Recovery codes copied.'); }}>Copy</Button>
+            <Button size="sm" variant="primary" onClick={() => setCodes(null)}>I saved them</Button>
+          </div>
+        </div>
+      ) : setup ? (
+        <div className="grid gap-4 sm:grid-cols-[200px_minmax(0,1fr)]">
+          <img src={setup.qr} alt="QR code for the authenticator app" width={200} height={200} className="rounded-lg border border-line bg-white" />
+          <div className="min-w-0 space-y-3 text-sm">
+            <p className="text-ink-2">1. Scan the code with an authenticator app (Google Authenticator, Microsoft Authenticator, 1Password …).</p>
+            <p className="text-xs text-muted">No camera? Enter this key: <code className="break-all font-mono text-ink">{setup.secret.replace(/(.{4})/g, '$1 ').trim()}</code></p>
+            <Field label="2. Enter the 6-digit code the app shows">
+              <input className="field font-mono tracking-[0.3em]" value={code} onChange={e => setCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code" maxLength={8} placeholder="123456" />
+            </Field>
+            <div className="flex gap-2">
+              <Button variant="primary" loading={busy} disabled={code.replace(/\D/g, '').length !== 6} onClick={() => void enable()}>Turn on</Button>
+              <Button variant="ghost" onClick={() => { setSetup(null); setCode(''); }}>Cancel</Button>
+            </div>
+          </div>
+        </div>
+      ) : on ? (
+        off.open ? (
+          <form className="grid gap-3 sm:grid-cols-2" onSubmit={e => { e.preventDefault(); void disable(); }}>
+            <Field label="Your password"><input className="field" type="password" autoComplete="current-password" value={off.password} onChange={e => setOff({ ...off, password: e.target.value })} /></Field>
+            <Field label="App or recovery code"><input className="field font-mono" value={off.code} onChange={e => setOff({ ...off, code: e.target.value })} inputMode="numeric" autoComplete="one-time-code" /></Field>
+            <div className="flex gap-2 sm:col-span-2">
+              <Button type="submit" variant="danger" loading={busy} disabled={!off.password || off.code.length < 6}>Turn off two-step sign-in</Button>
+              <Button variant="ghost" onClick={() => setOff({ open: false, password: '', code: '' })}>Cancel</Button>
+            </div>
+          </form>
+        ) : <Button onClick={() => setOff({ ...off, open: true })}>Turn off…</Button>
+      ) : <Button variant="primary" icon={<ShieldCheck size={15} />} loading={busy} onClick={() => void start()}>Turn on two-step sign-in</Button>}
     </Card>
   );
 }
@@ -311,6 +428,7 @@ function DiscoverySettings() {
   const app = useApp();
   const { data } = useQuery<DiscoveryConfigV>('discoveryConfig');
   const [days, setDays] = useState('');
+  const [daily, setDaily] = useState('');
   const allowed = app.can('discoverySettings');
   if (!data) return <Card title="Artist discovery"><Skeleton className="h-16" /></Card>;
   return (
@@ -327,6 +445,13 @@ function DiscoverySettings() {
           <input type="number" min={1} max={3650} className="field mt-1 !w-28" placeholder={String(data.staleDays)} value={days} onChange={e => setDays(e.target.value)} disabled={!allowed} /> days
         </label>
         <Button size="sm" disabled={!allowed || !days} onClick={async () => { await app.run('setDiscoverySettings', { staleDays: Number(days) }); setDays(''); }}>Save</Button>
+      </div>
+      <div className="mt-3 flex flex-wrap items-end gap-2">
+        <label className="text-sm text-ink-2">Find artist searches per person per day
+          <input type="number" min={0} max={1000} className="field mt-1 !w-28" placeholder={String(data.perPersonDaily)} value={daily} onChange={e => setDaily(e.target.value)} disabled={!allowed} />
+        </label>
+        <Button size="sm" disabled={!allowed || daily === ''} onClick={async () => { await app.run('setDiscoverySettings', { perPersonDaily: Number(daily) }); setDaily(''); }}>Save</Button>
+        <p className="w-full text-xs text-muted">{data.perPersonDaily ? `Each person can start ${data.perPersonDaily} searches in any 24 hours, so nobody can use up the team’s search quota.` : 'No daily limit per person.'} 0 = no limit.</p>
       </div>
       {!allowed && <p className="mt-2 text-xs text-muted">Only an Admin can change these settings.</p>}
     </Card>

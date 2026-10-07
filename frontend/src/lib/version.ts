@@ -1,7 +1,16 @@
 // The app version (shown in the footer) and a one-line summary of each change, shown once after an update.
-export const VERSION = 'V02.3.0';
+export const VERSION = 'V2.3.1';
 
 export const CHANGES: Record<string, string[]> = {
+  'V2.3.1': [
+    'Search ignores capitals, spaces, dots and dashes, finds words in any order, and shows the best match first.',
+    'Two-step sign-in: Settings → Two-step sign-in, with an authenticator app and one-time recovery codes.',
+    'Asking for an account now waits for an Admin’s approval (Settings → People and roles → Waiting for approval).',
+    'Admins can switch people off; the System Owner can also reset someone’s two-step sign-in.',
+    'Passwords need at least 12 characters, and passwords known from data breaches are refused.',
+    'Sessions end after 7 days without use. Each person can start a set number of Find artist searches per day.',
+    'A fresh installation needs the owner setup code from the server log to create the System Owner.',
+  ],
   'V02.3.0': [
     'Three roles: System Owner, Admin and User. Leads became Admins; Operators and Claim Reviewers became Users.',
     'System Owner: adds people, changes anyone’s role, sets anyone’s password and can delete all data. Everyone else sees the owner as Admin.',

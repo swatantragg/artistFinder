@@ -37,6 +37,20 @@ export function searchBlocked(_m: Model, ctx: Ctx): string | null {
   return ctx.discovery === 'off' ? NOT_CONFIGURED : null;
 }
 
+/** Find artist searches one person may start in 24 hours (Discovery settings; 0 = no limit). The System Owner has none. */
+export const DEFAULT_PER_PERSON_DAILY = 30;
+export function perPersonDaily(m: Model): number { const n = Number(m.getMeta('discovery.perPersonDaily') ?? DEFAULT_PER_PERSON_DAILY); return Number.isFinite(n) && n >= 0 ? n : DEFAULT_PER_PERSON_DAILY; }
+/** Why this person cannot start another search now (their 24-hour allowance is used up), or null. */
+export function personalLimit(m: Model, ctx: Ctx): string | null {
+  const limit = perPersonDaily(m);
+  const u = m.get('users', ctx.userId);
+  if (!limit || !u || u.role === 'System Owner' || u.role === 'Automation') return null;
+  const since = new Date(Date.parse(ctx.now) - 86_400_000).toISOString();
+  let used = 0;
+  for (const j of m.data.discoveryJobs.values()) if (j.requestedBy === ctx.userId && !j.bulkId && !j.retryOf && j.createdAt >= since) used++;
+  return used >= limit ? `You have started ${used} artist searches in the last 24 hours (the limit is ${limit} per person). Try again later, or ask an Admin.` : null;
+}
+
 export function queueJob(m: Model, ctx: Ctx, p: { caseId: string; mode: DiscoveryMode; trigger: string; requestedBy: string; focusTrackIds?: string[]; focus?: string[]; bulkId?: string | null; retryOf?: DiscoveryJob | null }): DiscoveryJob {
   const jobs = m.byCase('discoveryJobs', p.caseId);
   const version = p.retryOf ? p.retryOf.version : Math.max(0, ...jobs.filter(j => j.status !== 'CANCELLED' && (j.status !== 'FAILED' || j.resultCount > 0)).map(j => j.version)) + 1;

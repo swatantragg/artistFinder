@@ -6,8 +6,8 @@ import { Model } from '../src/domain/model';
 import type { SearchRequest } from '../src/domain/discovery/queries';
 import { serverProviders } from '../src/server/providers';
 
-const env = new URL('../.env', import.meta.url).pathname;
-if (existsSync(env)) process.loadEnvFile(env);
+// backend/.env, then the project's .env (where docker compose reads it).
+for (const f of ['../.env', '../../.env']) { const env = new URL(f, import.meta.url).pathname; if (existsSync(env)) process.loadEnvFile(env); }
 const name = process.argv[2] ?? 'Arijit Singh';
 const set = serverProviders(() => new Model());
 if (set.mode !== 'live') { console.log(`Live search is not configured: ${set.notes[0]}`); process.exit(1); }
