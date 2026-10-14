@@ -8,6 +8,7 @@ import { useActions } from '../actions';
 import { Badge, Button, Card, Empty, ErrorBox, Notice, Skeleton, cx } from '../ui';
 import { useApp, useQuery } from '../../lib/app';
 import { fmtAgo, fmtDate, fmtDateTime, num, plural } from '../../lib/format';
+import { AddProfileButton, type VerifiedLite } from './AddProfile';
 import { DiscoveryChip, MatchPill, PlatformBadge, ProfileLink, handleOf } from './bits';
 
 export interface ProfileV {
@@ -73,11 +74,15 @@ export function DiscoveryPanel({ caseId }: { caseId: string }) {
           {data.canFind && <Button variant="primary" icon={<Search size={16} />} loading={busy === 'full'} disabled={!!data.blocked || !!data.limit} onClick={() => start('full')}>{data.discoveryStatus === 'Failed' ? 'Retry Find artist' : 'Find artist'}</Button>}
           {!data.canFind && data.canRefresh && <Button icon={<RefreshCcw size={15} />} loading={busy === 'refresh'} onClick={() => start('refresh')} disabled={!!job || !!data.blocked || !!data.limit}>Search again</Button>}
           {(data.verifiedArtist || last) && <Button variant="ghost" icon={<Share2 size={15} />} loading={busy === 'connect'} onClick={findConnection}>Find connection</Button>}
+          <AddProfileButton caseId={caseId} name={data.name} verified={data.verified as VerifiedLite[]} />
         </div>
       </section>
 
       {job && <JobProgress job={job} name={data.name} />}
-      {!job && last?.status === 'FAILED' && (
+      {!job && last?.status === 'FAILED' && (last.failureReason ?? '').startsWith('Paused:') && (
+        <Notice tone="orange" icon={<AlertTriangle size={18} />} title="Search paused: the artist has passed away">{(last.failureReason ?? '').replace(/^Paused: /, '')} Use the buttons at the top of the page.</Notice>
+      )}
+      {!job && last?.status === 'FAILED' && !(last.failureReason ?? '').startsWith('Paused:') && (
         <Notice tone="red" icon={<AlertTriangle size={18} />} title="The search did not finish"
           action={<Button size="sm" variant="primary" onClick={async () => { setBusy('retry'); await app.run('retryDiscovery', { jobId: last.id }); setBusy(null); }} loading={busy === 'retry'}>Retry</Button>}>
           {last.failureReason}. This does not mean the artist does not exist.

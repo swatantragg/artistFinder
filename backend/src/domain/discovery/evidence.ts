@@ -35,10 +35,26 @@ const FAN_WORDS = /\b(fan|fans|fanpage|fanclub|fc|tribute|cover|covers|karaoke|l
 /** Words around a name that do not make it a different name (“Sonu Nigam Official”, “Singer Raju Singh”, “X - Topic”). */
 const NAME_NOISE = /\b(official|offical|music|musics|topic|vevo|tv|india|band|live|channel|page|the|singer|composer|lyricist|producer|musician|artist)\b/g;
 const MUSIC_SIGNALS = new Set<EvidenceKind>(['Music profile', 'Role match', 'Song match', 'ISRC match', 'Catalogue match', 'Label match', 'Collaborator match', 'Cross-platform match', 'Official website match']);
+/** A label, studio or company page is not the artist's own profile (e.g. @shaanmusiclabel next to the singer's @singer_shaan). */
+const COMPANY_WORDS = /\b(label|labels|records|recordz|studio|studios|production|productions|entertainment|films|media|company|pvt|ltd|llp|distribution)\b/;
+const COMPANY_IN_HANDLE = /(label|records|recordz|studios|productions|entertainment|films|pvtltd|distribution)/;
+/** The same account name on another platform of the artist: profiles found or verified there, at a match of 50% or more. */
+export interface SameHandle { platform: string; handle: string; verified: boolean }
+export function sameHandleOn(platform: string, username: string | null, others: { platform: string; username: string | null; verified: boolean }[]): SameHandle[] {
+  const hk = handleKey(username);
+  if (hk.length < 6) return [];   // short handles ("shaan") are shared by many people
+  const out: SameHandle[] = [];
+  for (const o of others) {
+    if (o.platform === platform || !o.username || handleKey(o.username) !== hk) continue;
+    const cur = out.find(x => x.platform === o.platform);
+    if (!cur) out.push({ platform: o.platform, handle: o.username, verified: o.verified }); else if (o.verified) cur.verified = true;
+  }
+  return out.sort((a, b) => Number(b.verified) - Number(a.verified));
+}
 const OTHER_PROFESSION = /\b(actor|actress|model|vlogger|photographer|chef|cricketer|cricket|fitness|software|engineer|coach|real estate|influencer)\b/;
 const clean = (s: string) => foldText(s).replace(NAME_NOISE, ' ').replace(/\s+/g, ' ').trim();
 
-export function scoreProfile(p: ProfileInput, f: CaseFacts, linkedFromStrong: string[] = []): Scored {
+export function scoreProfile(p: ProfileInput, f: CaseFacts, linkedFromStrong: string[] = [], sameHandle: SameHandle[] = []): Scored {
   const items: EvidenceItem[] = [];
   const add = (kind: EvidenceKind, detail: string, weight: number, polarity: 'match' | 'conflict' = 'match', hard = false) => items.push({ kind, detail, weight, polarity, hard });
   const nameHay = foldText(`${p.displayName} ${p.title}`);
@@ -87,8 +103,20 @@ export function scoreProfile(p: ProfileInput, f: CaseFacts, linkedFromStrong: st
   if (f.language && p.language && p.language.toLowerCase() !== f.language.toLowerCase()) add('Different language', `Profile language ${p.language}, catalogue ${f.language}`, -5, 'conflict');
   // linked from the artist's other profiles (or listed on the official website)
   for (const from of linkedFromStrong.slice(0, 1)) add(from.startsWith('website:') ? 'Official website match' : 'Cross-platform match', from.startsWith('website:') ? `Listed on the artist's website (${from.slice(8)})` : `Linked from ${from}`, 15);
+  // the same handle as the artist's profile on another platform: famous artists keep one handle everywhere (@singer_shaan)
+  if (sameHandle.length && p.username) {
+    const where = sameHandle.slice(0, 2).map(x => `${x.verified ? 'verified ' : ''}${x.platform}`).join(' and ');
+    add('Cross-platform match', `Same handle as the artist’s ${where} (@${sameHandle[0].handle})`, (sameHandle.some(x => x.verified) ? 25 : 20) + (sameHandle.length > 1 ? 5 : 0));
+  }
   // conflicts: a page about the artist rather than theirs, another person, another artist with the same name
   const specific = matchedSongs.length > 0 || !!isrcHit || !!label || collabs.length > 0;
+  const pageWords = foldText(`${p.displayName} ${p.title} ${p.username ?? ''}`);
+  // a company word in the words or glued into the handle (@shaanmusiclabel), or the page is named after the artist's label
+  const companyPage = COMPANY_WORDS.test(pageWords) || COMPANY_IN_HANDLE.test(handleKey(p.username))
+    || (!!p.displayName && foldText(p.displayName) !== foldText(f.name) && f.labels.some(l => foldText(l) === foldText(p.displayName)));
+  if (p.platform !== 'Website' && p.platform !== 'Label website' && companyPage && !COMPANY_WORDS.test(foldText(f.name))) {
+    add('Label or company page', `Looks like a label or company page (“${p.username ? `@${p.username}` : p.displayName}”), not the artist’s own`, -15, 'conflict');
+  }
   if (!exact && FAN_WORDS.test(nameHay)) add('Fan or compilation page', `Looks like a fan or compilation page (“${p.displayName || p.title}”)`, -25, 'conflict');
   const profession = OTHER_PROFESSION.exec(hay)?.[1];
   if (profession && !specific && !MUSIC_PLATFORMS.has(p.platform)) add('Different profession', `Profile describes ${/^[aeiou]/.test(profession) ? 'an' : 'a'} ${profession}, with no music from the catalogue`, -40, 'conflict', true);

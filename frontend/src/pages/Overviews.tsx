@@ -78,7 +78,7 @@ function RoutesList() {
       <div className="flex flex-wrap gap-1.5 border-b border-line px-3 py-2">
         {['', ...ROUTE_STATES].map(s => <button key={s} type="button" onClick={() => setState(s)} className={`rounded-full border px-3 py-1 text-xs ${state === s ? 'border-sel-line bg-sel font-medium text-sel-ink' : 'border-line-strong text-ink-2 hover:bg-hover'}`}>{s || 'All states'}</button>)}
       </div>
-      <DataTable rows={data} rowKey={r => r.id} onRowClick={r => navigate(`/artists/${r.targetCaseId}?tab=routes`)} empty={<Empty compact title="No verified routes found." />}
+      <DataTable rows={data} rowKey={r => r.id} onRowClick={r => navigate(`/artists/${r.targetCaseId}?tab=claims`)} empty={<Empty compact title="No verified routes found." />}
         columns={[
           { key: 'id', header: 'Route', render: r => <span className="mono">{r.id}</span> },
           { key: 'c', header: 'Path to the artist', render: r => <RouteChain chain={r.chain} /> },
@@ -110,7 +110,7 @@ function AttemptsList() {
   const { data } = useQuery<{ id: string; caseId: string; caseName: string; date: string; channel: string; recipient: string; result: string; evidence: string; nextAction: string; ownerName: string }[]>('recentAttempts');
   const navigate = useNavigate();
   return (
-    <DataTable rows={data} rowKey={r => r.id} onRowClick={r => navigate(`/artists/${r.caseId}?tab=routes`)} empty={<Empty compact title="No contact attempts recorded." />}
+    <DataTable rows={data} rowKey={r => r.id} onRowClick={r => navigate(`/artists/${r.caseId}?tab=claims`)} empty={<Empty compact title="No contact attempts recorded." />}
       columns={[
         { key: 'd', header: 'Date', render: r => <span className="whitespace-nowrap">{fmtDateTime(r.date)}</span> },
         { key: 'a', header: 'Artist', render: r => <span className="font-medium">{r.caseName}</span> },

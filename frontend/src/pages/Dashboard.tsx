@@ -34,15 +34,15 @@ export default function Dashboard() {
       {data && data.total === 0 && <FirstImport />}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         <Tile label="Total artists" value={data?.total} to="/artists" hint={data ? `${num(data.collaborators)} credited collaborators are counted separately` : undefined} />
-        <Tile label="New artists" value={st?.NEW} to="/artists?status=NEW" tone={ARTIST_STATUS_INFO.NEW.tone} hint={ARTIST_STATUS_INFO.NEW.meaning} />
-        <Tile label="Pending verification" value={st?.PENDING} to="/artists?status=PENDING" tone={ARTIST_STATUS_INFO.PENDING.tone} hint={ARTIST_STATUS_INFO.PENDING.meaning} />
-        <Tile label="Searching" value={st?.SEARCHING} to="/artists?status=SEARCHING" tone={ARTIST_STATUS_INFO.SEARCHING.tone} hint={ARTIST_STATUS_INFO.SEARCHING.meaning} />
-        <Tile label="Needs review" value={st?.NEEDS_REVIEW} to="/artists?status=NEEDS_REVIEW" tone={ARTIST_STATUS_INFO.NEEDS_REVIEW.tone} hint={ARTIST_STATUS_INFO.NEEDS_REVIEW.meaning} />
-        <Tile label="Reopened" value={st?.REOPENED} to="/artists?status=REOPENED" tone={ARTIST_STATUS_INFO.REOPENED.tone} hint={ARTIST_STATUS_INFO.REOPENED.meaning} />
+        <Tile label="New artists" value={st?.NEW} to="/artists?scope=all" tone={ARTIST_STATUS_INFO.NEW.tone} hint={ARTIST_STATUS_INFO.NEW.meaning} />
+        <Tile label="Pending verification" value={st?.PENDING} to="/verified?view=progress&status=PENDING" tone={ARTIST_STATUS_INFO.PENDING.tone} hint={ARTIST_STATUS_INFO.PENDING.meaning} />
+        <Tile label="Searching" value={st?.SEARCHING} to="/verified?view=progress&status=SEARCHING" tone={ARTIST_STATUS_INFO.SEARCHING.tone} hint={ARTIST_STATUS_INFO.SEARCHING.meaning} />
+        <Tile label="Needs review" value={st?.NEEDS_REVIEW} to="/verified?view=progress&status=NEEDS_REVIEW" tone={ARTIST_STATUS_INFO.NEEDS_REVIEW.tone} hint={ARTIST_STATUS_INFO.NEEDS_REVIEW.meaning} />
+        <Tile label="Reopened" value={st?.REOPENED} to="/verified?status=REOPENED" tone={ARTIST_STATUS_INFO.REOPENED.tone} hint={ARTIST_STATUS_INFO.REOPENED.meaning} />
         <Tile label="Possible duplicates" value={data?.duplicates} to="/deduplicate" tone="orange" hint="Records that may be the same artist" />
-        <Tile label="Verified artists" value={st?.VERIFIED} to="/artists?status=VERIFIED" tone={ARTIST_STATUS_INFO.VERIFIED.tone} hint={data ? `${num(data.verifiedAll)} verified in total, including reopened ones` : undefined} />
+        <Tile label="Verified artists" value={st?.VERIFIED} to="/verified" tone={ARTIST_STATUS_INFO.VERIFIED.tone} hint={data ? `${num(data.verifiedAll)} verified in total, including reopened ones` : undefined} />
         <Tile label="Goongoonalo artists" value={data?.goongoonalo.GOONGOONALO} to="/verified?goongoonalo=GOONGOONALO" tone="green" hint="Goongoonalo status decided by a person" />
-        <Tile label="Rejected" value={st?.REJECTED} to="/artists?status=REJECTED" tone={ARTIST_STATUS_INFO.REJECTED.tone} hint={ARTIST_STATUS_INFO.REJECTED.meaning} />
+        <Tile label="Rejected" value={st?.REJECTED} to="/artists?status=REJECTED&scope=all" tone={ARTIST_STATUS_INFO.REJECTED.tone} hint={ARTIST_STATUS_INFO.REJECTED.meaning} />
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-[1.1fr_1fr]">
@@ -51,7 +51,7 @@ export default function Dashboard() {
             <table className="w-full text-sm">
               <thead><tr className="border-b border-line bg-surface-2 text-xs text-muted"><th className="px-4 py-2 text-left font-medium" /><th className="px-4 py-2 text-right font-medium">This week</th><th className="px-4 py-2 text-right font-medium">This month</th></tr></thead>
               <tbody>
-                {([['Artists added', 'added', '/artists?status=NEW'], ['Artists verified', 'verified', '/verified'], ['Added to Goongoonalo', 'goongoonalo', '/verified?goongoonalo=GOONGOONALO']] as const).map(([label, k, to]) => (
+                {([['Artists added', 'added', '/artists?status=NEW&scope=all'], ['Artists verified', 'verified', '/verified'], ['Added to Goongoonalo', 'goongoonalo', '/verified?goongoonalo=GOONGOONALO']] as const).map(([label, k, to]) => (
                   <tr key={k} className="border-b border-line last:border-0">
                     <td className="px-4 py-2.5"><Link to={to} className="text-ink hover:underline">{label}</Link></td>
                     <td className="px-4 py-2.5 text-right text-lg font-semibold tnum text-ink">{num(data.week[k])}</td>

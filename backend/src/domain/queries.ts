@@ -4,7 +4,7 @@ import {
   CHECKLIST_STEPS, CLAIM_STATUSES, LIFECYCLE_STAGES, OPEN_TASK_STATUSES, STAGE_INFO, type LifecycleStage, type TaskStatus,
 } from './constants';
 import type { Model } from './model';
-import { can, openTasks, stageIndex, userName, viewUser, visibleRole } from './ops';
+import { can, notUndone, openTasks, stageIndex, userName, viewUser, visibleRole } from './ops';
 import type { ArtistCase, Ctx, ImportRow, Route, Task, Track } from './types';
 import { bestTier, matchTier, sameId, searchKey, searchQuery, TIER } from './search';
 import { addDays, daysBetween, nameKey, normIsrc } from './util';
@@ -13,8 +13,14 @@ import { personalLimit, searchBlocked } from './discovery/pipeline';
 import { discoveryViews, staleDaysOf } from './discovery/views';
 import { ARTIST_STATUS_INFO, GOONGOONALO_INFO } from './constants';
 import { isVerified, reopenReasons } from './status';
-import { actionFor, artistAggregates, collaboratorCount, searchArtists, v2Views } from './views';
+import { TOP_ARTISTS, actionFor, artistAggregates, artistRanks, collaboratorCount, searchArtists, v2Views } from './views';
 import { relevantOpen } from './discovery/relevance';
+import { inGraphScope } from './graph';
+import { dmTargets, messageViews, outreachState } from './messages';
+import { contactProcess, processSteps, resetBlocked, undoBlocked } from './undo';
+import { statusBoard } from './board';
+import { verifiedExport } from './exports';
+import { lifeHold } from './life';
 
 // ------------------------------------------------------------------ cached aggregates (recomputed when the model changes)
 const cache = new WeakMap<Model, { v: number; songs: Map<string, number> }>();
@@ -59,7 +65,8 @@ export function caseActions(m: Model, c: ArtistCase, userId: string, blocked: st
     case 'Unresearched': addDiscovery(true); add('startResearch', 'Research manually', !!noFind); break;
     case 'Identity Review': add('openIdentityReview', 'Review identity', true); addDiscovery(false); break;
     case 'Researching':
-      if (verified.length) add('recordContact', 'Record contact', true, dnc ? 'Contact preference blocks outreach' : undefined);
+      // A verified route, or the artist's own verified profile (contacted directly, without a route).
+      if (verified.length || c.verifiedProfileCount > 0) add('recordContact', 'Record contact', true, dnc ? 'Contact preference blocks outreach' : undefined);
       else addDiscovery(true);
       add('moveToWaiting', 'Move to Waiting for Evidence');
       break;
@@ -87,6 +94,8 @@ export function caseActions(m: Model, c: ArtistCase, userId: string, blocked: st
   if (!a.some(x => x.id === discovery.id)) addDiscovery(false);
   if (discovery.id !== 'findConnection' && (c.verifiedProfileCount > 0 || searched)) add('findConnection', 'Find connection');
   if (!running && (c.verifiedProfileCount > 0 || searched)) add('refreshSearch', 'Refresh search');
+  // Connections are kept for the top artists only.
+  for (const x of a) if (x.id === 'findConnection' && !inGraphScope(m, c.id)) { x.disabled = 'Connections are kept for the top 250 artists only'; x.primary = false; }
   if (s !== 'Closed') {
     if (!a.some(x => x.id === 'addResearch') && stageIndex(s) <= stageIndex('Contact Attempted')) add('addResearch', 'Add research (manual)');
     if (stageIndex(s) <= stageIndex('Contact Confirmed')) add('addRoute', 'Add route');
@@ -165,10 +174,14 @@ export const queries = {
         searching: m.all('discoveryJobs').filter(j => ACTIVE_JOB_STATUSES.includes(j.status)).length,
         dedupe: m.all('conflicts').filter(c => c.status === 'Open').length,
         needsReview: m.all('cases').filter(c => !c.mergedIntoId && c.artistStatus === 'NEEDS_REVIEW').length,
+        // Verified Artists → In progress: candidates to review, and artists who passed away (continue or remove?)
+        verifiedTodo: m.all('cases').filter(c => !c.mergedIntoId && !c.rejectedAt && (c.artistStatus === 'NEEDS_REVIEW' || lifeHold(c))).length,
         reopenedArtists: m.all('cases').filter(c => !c.mergedIntoId && c.artistStatus === 'REOPENED').length,
         goongoonaloPending: m.all('cases').filter(c => !c.mergedIntoId && !c.rejectedAt && isVerified(c) && c.goongoonaloStatus === 'PENDING').length,
+        // Messages: follow-ups due today or earlier.
+        messages: m.all('cases').filter(c => !c.mergedIntoId && isVerified(c)).filter(c => { const q = outreachState(m, c, ctx.today).sequence; return !!q && !q.ended && !!q.nextDue && q.nextDue <= ctx.today; }).length,
       },
-      permissions: Object.fromEntries(['import', 'identityDecision', 'reviewClaim', 'verifyBackendClaim', 'closeCase', 'reassign', 'resolveException', 'bulkDiscovery', 'discoverySettings', 'manageUsers', 'managePasswords', 'resetWorkspace'].map(p => [p, can(m, ctx.userId, p)])),
+      permissions: Object.fromEntries(['import', 'identityDecision', 'reviewClaim', 'verifyBackendClaim', 'closeCase', 'reassign', 'resolveException', 'bulkDiscovery', 'discoverySettings', 'manageUsers', 'managePasswords', 'resetWorkspace', 'messageSettings'].map(p => [p, can(m, ctx.userId, p)])),
       discoveryBlocked: searchBlocked(m, ctx) ?? ctx.searchBudget?.exhausted ?? personalLimit(m, ctx) ?? null,
     };
   },
@@ -184,8 +197,8 @@ export const queries = {
       { label: 'Identified', value: cases.length },
       { label: 'Researching', value: reached('Researching') },
       { label: 'Route Ready', value: reached('Route Ready') },
-      { label: 'Contacted', value: cases.filter(c => m.byCase('attempts', c.id).length > 0).length },
-      { label: 'Claim Submitted', value: cases.filter(c => m.familyItems('claimEvents', c.id).some(e => e.type === 'Submitted')).length },
+      { label: 'Contacted', value: cases.filter(c => notUndone(m.byCase('attempts', c.id)).length > 0).length },
+      { label: 'Claim Submitted', value: cases.filter(c => notUndone(m.familyItems('claimEvents', c.id)).some(e => e.type === 'Submitted')).length },
       { label: 'Claim Completed', value: claimed },
       { label: 'Activated', value: cases.filter(c => c.activationStatus === 'Activated').length },
     ];
@@ -260,10 +273,10 @@ export const queries = {
     if (!raw) return null;
     const c = raw;
     const songs = songCounts(m).get(m.canonical(c.id)) ?? 0;
-    const attempts = m.familyItems('attempts', c.id);
-    const claimEvents = m.familyItems('claimEvents', c.id);
-    const act = m.familyItems('activationEvents', c.id);
-    const routes = m.byCase('routes', c.id);
+    const attempts = notUndone(m.familyItems('attempts', c.id));
+    const claimEvents = notUndone(m.familyItems('claimEvents', c.id));
+    const act = notUndone(m.familyItems('activationEvents', c.id));
+    const routes = m.byCase('routes', c.id).filter(r => r.state !== 'Deleted');
     const done = c.checklist.filter(x => x.status === 'Complete').length;
     const si = stageIndex(c.lifecycleStage);
     const after = (s: LifecycleStage) => c.lifecycleStage !== 'Closed' && si >= stageIndex(s);
@@ -319,7 +332,7 @@ export const queries = {
           firstVerifiedAt: c.firstVerifiedAt, rejected: c.rejectedAt ? { at: c.rejectedAt, reason: c.rejectedReason } : null,
           reopen: c.reopen ? { at: c.reopen.at, by: userName(m, c.reopen.by), previousStatus: c.reopen.previousStatus, reasons: reopenReasons(c) } : null,
           summary: {
-            songs: tracks.length, albums: new Set(tracks.map(t => t.releaseId).filter(Boolean)).size, collaborators: collaboratorCount(m, c.id), labels: [...new Set(tracks.map(t => t.label).filter(Boolean))],
+            songs: Math.max(tracks.length, c.directory?.songs ?? 0), titlesOnFile: tracks.length, albums: new Set(tracks.map(t => t.releaseId).filter(Boolean)).size, collaborators: collaboratorCount(m, c.id), labels: [...new Set(tracks.map(t => t.label).filter(Boolean))],
             verifiedProfiles: vps.length, possibleRoutes: m.byCase('connectionPaths', c.id).filter(x => x.status === 'SUGGESTED' && !x.note).length + routes.filter(r => r.state === 'Verified' || r.state === 'Selected').length,
           },
           lastDiscovery: lastJob?.finishedAt ?? null, sources: batches.map(b => ({ id: b!.id, file: b!.originalFilename, date: b!.uploadDate })),
@@ -367,6 +380,9 @@ export const queries = {
     const caseId = m.canonical(p.id);
     const c = m.get('cases', caseId);
     if (!c) return null;
+    const center = { id: caseId, name: c.canonicalName, artistId: c.backendProfileIds[0] ?? null, verified: isVerified(c) };
+    // The graph is kept for the top artists only (closest connections); the Collaborators tab still lists everyone.
+    if (!inGraphScope(m, caseId)) return { center, people: [], inScope: false, topSize: TOP_ARTISTS, rank: artistRanks(m).get(caseId) ?? null };
     const fam = new Set(m.family(caseId));
     const people = new Map<string, { name: string; caseId: string | null; songs: Map<string, { title: string; album: string; roles: Set<string>; mine: Set<string> }> }>();
     for (const tid of m.trackIdsOfCase(caseId)) {
@@ -389,7 +405,7 @@ export const queries = {
       const songs = [...x.songs.entries()].map(([id, s]) => ({ id, title: s.title, album: s.album, roles: [...s.roles], mine: [...s.mine] })).sort((a, b) => a.title.localeCompare(b.title) || a.album.localeCompare(b.album));
       return { key, name: x.name, caseId: x.caseId, kind: cc ? cc.kind : 'Not linked', verified: cc ? isVerified(cc) : false, roles: [...new Set(songs.flatMap(s => s.roles))], songCount: songs.length, songs };
     }).sort((a, b) => b.songCount - a.songCount || a.name.localeCompare(b.name));
-    return { center: { id: caseId, name: c.canonicalName, artistId: c.backendProfileIds[0] ?? null, verified: isVerified(c) }, people: list };
+    return { center, people: list, inScope: true, topSize: TOP_ARTISTS, rank: artistRanks(m).get(caseId) ?? null };
   },
 
   caseCollaborators(m: Model, _ctx: Ctx, p: { id: string }) {
@@ -406,7 +422,7 @@ export const queries = {
         map.set(key, x);
       }
     }
-    const routes = m.byCase('routes', p.id);
+    const routes = m.byCase('routes', p.id).filter(r => r.state !== 'Deleted');
     return [...map.values()].map(x => {
       const cc = x.caseId ? m.get('cases', x.caseId) : null;
       const contacts = x.caseId ? m.contactsFor(x.caseId) : m.contactsNamed(x.name);
@@ -422,7 +438,7 @@ export const queries = {
 
   caseRoutes(m: Model, _ctx: Ctx, p: { id: string }) {
     const order = { Selected: 0, Verified: 1, Candidate: 2, Exhausted: 3, Rejected: 4 } as Record<string, number>;
-    return m.byCase('routes', p.id).sort((a, b) => order[a.state] - order[b.state] || a.ranking - b.ranking).map(r => routeView(m, r));
+    return m.byCase('routes', p.id).filter(r => r.state !== 'Deleted').sort((a, b) => order[a.state] - order[b.state] || a.ranking - b.ranking).map(r => routeView(m, r));
   },
   caseResearch(m: Model, _ctx: Ctx, p: { id: string }) {
     const c = m.get('cases', p.id)!;
@@ -436,10 +452,21 @@ export const queries = {
   caseAttempts(m: Model, _ctx: Ctx, p: { id: string }) {
     return m.familyItems('attempts', p.id).sort((a, b) => b.date.localeCompare(a.date)).map(a => ({ ...a, ownerName: userName(m, a.ownerId), routeLabel: a.routeId ? routeView(m, m.get('routes', a.routeId)!).chain.map(x => x.label).join(' → ') : 'Direct' }));
   },
+  /** Contact and claim as processes: steps that count, what can be undone or reset, and the next step. */
+  statusBoard,
+  verifiedExport,
+  caseProcess(m: Model, ctx: Ctx, p: { id: string }) {
+    const c = m.get('cases', m.canonical(p.id));
+    if (!c) return null;
+    const claim = processSteps(m, c, 'claim'), all = processSteps(m, c, 'all');
+    const side = (kind: 'claim' | 'all', steps: typeof all) => ({ steps: steps.map(s => ({ at: s.at, label: s.label, by: userName(m, s.by) })), canUndo: undoBlocked(m, c, kind, steps), canReset: resetBlocked(m, c, kind) });
+    return { contact: contactProcess(m, ctx, c), claim: side('claim', claim), all: side('all', all), targets: dmTargets(m, c), memberMessageSent: notUndone(m.familyItems('messages', c.id)).some(x => x.kind === 'member') };
+  },
   caseClaims(m: Model, _ctx: Ctx, p: { id: string }) {
     const c = m.get('cases', p.id)!;
     const events = m.familyItems('claimEvents', p.id).sort((a, b) => a.date.localeCompare(b.date)).map(e => ({ ...e, actorName: userName(m, e.actorId), reviewerName: e.reviewerId ? userName(m, e.reviewerId) : null }));
-    const last = (t: string) => events.filter(e => e.type === t).pop();
+    // Undone steps stay in the list (marked); the record fields come from the steps that still count.
+    const last = (t: string) => events.filter(e => e.type === t && !e.undoneAt).pop();
     const stages = ['Not Invited', 'Claim Invited', 'Claim Submitted', 'Claim Review', 'Claim Approved', 'Claim Completed'];
     const reachedIdx = c.claimStatus === 'Completed' ? 5 : c.claimStatus === 'Approved' ? 4 : c.claimStatus === 'In Review' ? 3 : c.claimStatus === 'Submitted' ? 2 : c.claimStatus === 'Invited' ? 1 : 0;
     return {
@@ -453,7 +480,7 @@ export const queries = {
   },
   caseActivation(m: Model, _ctx: Ctx, p: { id: string }) {
     const c = m.get('cases', p.id)!;
-    const events = m.familyItems('activationEvents', p.id).sort((a, b) => a.date.localeCompare(b.date)).map(e => ({ ...e, operatorName: e.operatorId ? userName(m, e.operatorId) : null, actorName: userName(m, e.actorId) }));
+    const events = notUndone(m.familyItems('activationEvents', p.id)).sort((a, b) => a.date.localeCompare(b.date)).map(e => ({ ...e, operatorName: e.operatorId ? userName(m, e.operatorId) : null, actorName: userName(m, e.actorId) }));
     const feat = events.filter(e => e.type === 'Feature Selected').pop();
     const use = events.filter(e => e.type === 'Meaningful Use').pop();
     return {
@@ -533,7 +560,7 @@ export const queries = {
     return { working, activities };
   },
   routesOverview(m: Model, _ctx: Ctx, p: { state?: string } = {}) {
-    return m.all('routes').filter(r => !p.state || r.state === p.state).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300).map(r => routeView(m, r));
+    return m.all('routes').filter(r => r.state !== 'Deleted' && (!p.state || r.state === p.state)).sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 300).map(r => routeView(m, r));
   },
   contacts(m: Model) {
     return m.all('contacts').sort((a, b) => Number(b.verified) - Number(a.verified) || a.personName.localeCompare(b.personName)).map(k => ({ ...k, verifiedByName: k.verifiedById ? userName(m, k.verifiedById) : null, routes: m.all('routes').filter(r => r.contactId === k.id).length }));
@@ -576,27 +603,27 @@ export const queries = {
     const waiting = cases.filter(c => c.lifecycleStage === 'Waiting for Evidence');
     const age = (c: ArtistCase) => daysBetween(c.stageSince, ctx.today);
     const ageing = [['0-7 days', 0, 7], ['8-30 days', 8, 30], ['31-90 days', 31, 90], ['90+ days', 91, 1e9]].map(([label, lo, hi]) => ({ label: label as string, value: waiting.filter(c => age(c) >= (lo as number) && age(c) <= (hi as number)).length }));
-    const routes = m.all('routes');
+    const routes = m.all('routes').filter(r => r.state !== 'Deleted');
     const routeStates = ['Candidate', 'Verified', 'Selected', 'Rejected', 'Exhausted'].map(s => ({ label: s, value: routes.filter(r => r.state === s).length }));
-    const attempts = m.all('attempts');
+    const attempts = notUndone(m.all('attempts'));
     const results = [...new Set(attempts.map(a => a.result))].map(r => ({ label: r, value: attempts.filter(a => a.result === r).length })).sort((a, b) => b.value - a.value);
     const weeks: { label: string; value: number }[] = [];
     for (let w = 5; w >= 0; w--) { const from = addDays(ctx.today, -7 * (w + 1) + 1), to = addDays(ctx.today, -7 * w); weeks.push({ label: `${from.slice(5)}–${to.slice(5)}`, value: m.all('reopens').filter(r => r.date.slice(0, 10) >= from && r.date.slice(0, 10) <= to).length }); }
     const claimFunnel = [
-      { label: 'Invited', value: cases.filter(c => m.familyItems('claimEvents', c.id).some(e => e.type === 'Invited')).length },
-      { label: 'Submitted', value: cases.filter(c => m.familyItems('claimEvents', c.id).some(e => e.type === 'Submitted')).length },
-      { label: 'Approved', value: cases.filter(c => m.familyItems('claimEvents', c.id).some(e => e.type === 'Approved')).length },
+      { label: 'Invited', value: cases.filter(c => notUndone(m.familyItems('claimEvents', c.id)).some(e => e.type === 'Invited')).length },
+      { label: 'Submitted', value: cases.filter(c => notUndone(m.familyItems('claimEvents', c.id)).some(e => e.type === 'Submitted')).length },
+      { label: 'Approved', value: cases.filter(c => notUndone(m.familyItems('claimEvents', c.id)).some(e => e.type === 'Approved')).length },
       { label: 'Completed (backend verified)', value: cases.filter(c => c.claimStatus === 'Completed').length },
     ];
     const activationFunnel = [
       { label: 'Claim completed', value: cases.filter(c => c.claimStatus === 'Completed').length },
-      { label: 'Access verified', value: cases.filter(c => m.familyItems('activationEvents', c.id).some(e => e.type === 'Access Verified')).length },
+      { label: 'Access verified', value: cases.filter(c => notUndone(m.familyItems('activationEvents', c.id)).some(e => e.type === 'Access Verified')).length },
       { label: 'Meaningful use', value: cases.filter(c => c.activationStatus === 'Activated').length },
       { label: 'Ongoing ARM', value: cases.filter(c => c.lifecycleStage === 'Ongoing ARM').length },
     ];
     const conversations = attempts.filter(a => ['Interested', 'Needs Help', 'Conversation Confirmed'].includes(a.result)).length;
     const routeSuccess = routes.filter(r => r.state === 'Selected' || r.state === 'Rejected' || r.state === 'Exhausted').length;
-    const routeConfirmed = cases.filter(c => m.byCase('attempts', c.id).some(a => a.routeId && ['Interested', 'Needs Help', 'Conversation Confirmed'].includes(a.result))).length;
+    const routeConfirmed = cases.filter(c => notUndone(m.byCase('attempts', c.id)).some(a => a.routeId && ['Interested', 'Needs Help', 'Conversation Confirmed'].includes(a.result))).length;
     return {
       total: d.total, backendProfiles: d.backendProfiles, stageDistribution: LIFECYCLE_STAGES.map(s => ({ label: s, value: d.byStage[s] })), claimFunnel, activationFunnel,
       overdue: tasks.filter(t => openTask(t) && t.dueDate < ctx.today).length, owners, waitingAgeing: ageing, reopenedByWeek: weeks, reopenedTotal: m.count('reopens'),
@@ -651,7 +678,7 @@ export const queries = {
     const contacts = m.all('contacts').map(k => ({ k, tier: bestTier(q, [k.personName], { similar: false }) || (searchKey(k.value).includes(q.key) ? TIER.CONTAINS : 0) })).filter(x => x.tier).sort((a, b) => a.tier - b.tier);
     for (const { k } of contacts.slice(0, 8)) out.push({ type: 'Contact', id: k.id, caseId: k.caseId, label: k.personName, sub: `${k.channel} · ${k.verified ? 'verified' : 'unverified'}` });
     for (const t of m.all('tasks')) if (sameId(q, t.id) || (q.key.length > 3 && openTask(t) && matchTier(q, t.step, { similar: false }))) out.push({ type: 'Task', id: t.id, caseId: t.caseId, label: `${t.id} ${t.step}`, sub: `${m.get('cases', t.caseId)?.canonicalName ?? ''} · ${t.status}` });
-    for (const r of m.all('routes')) if (sameId(q, r.id)) out.push({ type: 'Route', id: r.id, caseId: r.targetCaseId, label: r.id, sub: routeView(m, r).chain.map(x => x.label).join(' → ') });
+    for (const r of m.all('routes')) if (r.state !== 'Deleted' && sameId(q, r.id)) out.push({ type: 'Route', id: r.id, caseId: r.targetCaseId, label: r.id, sub: routeView(m, r).chain.map(x => x.label).join(' → ') });
     return out.slice(0, 60);
   },
   notifications(m: Model) {
@@ -660,6 +687,7 @@ export const queries = {
   },
   ...discoveryViews,
   ...v2Views,
+  ...messageViews,
   caseOptions(m: Model, _ctx: Ctx, p: { q: string }) {
     const q = searchQuery(p.q);
     const found = q.key ? searchArtists(m, p.q, { catalogue: false }) : null;

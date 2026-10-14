@@ -3,7 +3,7 @@
 // invents results.
 import type { Platform } from '../constants';
 import type { Model } from '../model';
-import type { ProfileTrack } from '../types';
+import type { LifeCheck, ProfileTrack } from '../types';
 import { nameKey } from '../util';
 import { normalizeProfileUrl } from './normalize';
 import type { SearchRequest } from './queries';
@@ -45,7 +45,11 @@ export interface DiscoveryProvider {
   crawl?(url: string, ctx: SearchContext): Promise<CrawlResult | null>;
 }
 /** 'live' = search providers are configured; 'off' = none are, so Find artist is switched off with the reason. */
-export interface ProviderSet { mode: 'live' | 'off'; providers: DiscoveryProvider[]; notes: string[] }
+export interface ProviderSet {
+  mode: 'live' | 'off'; providers: DiscoveryProvider[]; notes: string[];
+  /** "Is the artist alive?" (public records), asked before the search; null/throw = could not check (the search goes on). */
+  lifeCheck?: (names: string[]) => Promise<LifeCheck | null>;
+}
 
 /** A provider that cannot answer (outage, quota, credentials). Never means "artist not found". */
 export class ProviderError extends Error {

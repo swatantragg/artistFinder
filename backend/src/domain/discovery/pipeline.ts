@@ -6,9 +6,10 @@ import { findConnections, nid, pathText, savePaths, syncProfileGraph, upsertEdge
 import type { Model } from '../model';
 import { audit, notify, openTask, userName } from '../ops';
 import { reopenArtist, syncArtistStatus } from '../status';
-import type { ArtistProfile, Ctx, DiscoveryJob, DiscoveryResult, FoundVia, JobProvider, ProfileTrack } from '../types';
+import type { ArtistProfile, Ctx, DiscoveryJob, DiscoveryResult, FoundVia, JobProvider, LifeCheck, ProfileTrack } from '../types';
+import { diedText, lifeHold } from '../life';
 import { daysBetween } from '../util';
-import { groupLetter, groupProfiles, locationConflicts, MATCH_THRESHOLD, scoreProfile, type ProfileInput, type Scored } from './evidence';
+import { groupLetter, groupProfiles, locationConflicts, MATCH_THRESHOLD, sameHandleOn, scoreProfile, type ProfileInput, type Scored } from './evidence';
 import { artistProfileUrl, foldText, handleKey, hasPhrase, normalizeProfileUrl, normalizeQuery, profileName, type NormalizedUrl } from './normalize';
 import { pendingChanges, relevantOpen, reviewCount } from './relevance';
 import { NOT_CONFIGURED, type CrawlResult, type ProviderHit } from './providers';
@@ -83,7 +84,7 @@ export function syncDiscoveryState(m: Model, ctx: Ctx, caseId: string) {
   const verified = m.byCase('verifiedProfiles', caseId).filter(v => v.verificationStatus === 'VERIFIED').length;
   const open = relevantOpen(m, caseId).length + pendingChanges(m, caseId).length;
   const last = jobs.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0];
-  const status = active ? (active.status === 'QUEUED' ? 'Queued' : 'Searching') : open > 0 ? 'Needs verification' : verified > 0 ? 'Verified' : last?.status === 'FAILED' ? 'Failed' : last ? 'No candidate' : 'Not started';
+  const status = active ? (active.status === 'QUEUED' ? 'Queued' : 'Searching') : lifeHold(c) ? 'Needs decision' : open > 0 ? 'Needs verification' : verified > 0 ? 'Verified' : last?.status === 'FAILED' ? 'Failed' : last ? 'No candidate' : 'Not started';
   if (c.discoveryStatus !== status || c.verifiedProfileCount !== verified) m.update('cases', caseId, { discoveryStatus: status, verifiedProfileCount: verified, discoveryUpdatedAt: ctx.now });
   syncArtistStatus(m, ctx, caseId);
 }
@@ -158,6 +159,10 @@ function scoreAll(facts: CaseFacts, list: Agg[], anchors: Map<string, string>): 
   const first = new Map(list.map(a => [a, scoreProfile(inputOf(a), facts)]));
   const strong = new Map<string, string>(anchors);
   for (const [a, s] of first) if (s.strength === 'STRONG') strong.set(a.norm.normalized, a.norm.platform === 'Website' ? `website:${a.norm.host}` : ['Instagram', 'YouTube', 'X', 'SoundCloud'].includes(a.norm.platform) && a.username ? `${a.norm.platform} @${a.username}` : `${a.norm.platform} “${a.displayName}”`);
+  // Handles of the artist's verified profiles and of good candidates (50%+): the same handle elsewhere is strong evidence.
+  const handles: { platform: string; username: string | null; verified: boolean }[] = [];
+  for (const url of facts.verifiedUrls.keys()) { const n = normalizeProfileUrl(`https://${url}`); if (n?.username) handles.push({ platform: n.platform, username: n.username, verified: true }); }
+  for (const [a, s] of first) if (s.score >= MATCH_THRESHOLD && a.username) handles.push({ platform: a.norm.platform, username: a.username, verified: false });
   const out = new Map<Agg, Scored>();
   for (const a of list) {
     const linked: string[] = [];
@@ -166,7 +171,8 @@ function scoreAll(facts: CaseFacts, list: Agg[], anchors: Map<string, string>): 
       const from = list.find(x => x.norm.normalized === url);
       if ((from && from.links.has(a.norm.normalized)) || a.links.has(url)) linked.push(label);
     }
-    out.set(a, linked.length ? scoreProfile(inputOf(a), facts, linked) : first.get(a)!);
+    const same = sameHandleOn(a.norm.platform, a.username, handles);
+    out.set(a, linked.length || same.length ? scoreProfile(inputOf(a), facts, linked, same) : first.get(a)!);
   }
   return out;
 }
@@ -368,7 +374,7 @@ export function finalizeJob(m: Model, ctx: Ctx, jobId: string, collected: Collec
   // 4. a full search that no longer sees a profile marks it "not found" (it is never invalidated automatically)
   const webOk = collected.providers.some(p => p.kind === 'web' && (p.status === 'ok' || p.status === 'partial'));
   const seen = new Set(artistAggs.filter(a => [...a.providers].some(x => x !== 'Internal catalogue')).map(a => a.norm.normalized));
-  if (job.mode !== 'targeted' && webOk) for (const p of m.byCase('profiles', caseId)) if (p.discoveryStatus === 'FOUND' && p.lastJobId !== jobId && !seen.has(p.normalizedUrl) && p.verificationStatus !== 'REJECTED' && p.verificationStatus !== 'REPLACED') m.update('profiles', p.id, { discoveryStatus: 'NOT_FOUND' });
+  if (job.mode !== 'targeted' && webOk) for (const p of m.byCase('profiles', caseId)) if (p.discoveryStatus === 'FOUND' && p.lastJobId !== jobId && !seen.has(p.normalizedUrl) && !p.source.includes('Added by hand') && p.verificationStatus !== 'REJECTED' && p.verificationStatus !== 'REPLACED') m.update('profiles', p.id, { discoveryStatus: 'NOT_FOUND' });
   // 5. groups, then profile changes (a verified profile not found again + a candidate on the same platform in the same group)
   const groupCount = regroup(m, caseId);
   for (const v of m.byCase('profiles', caseId).filter(p => p.verificationStatus === 'VERIFIED' && p.discoveryStatus === 'NOT_FOUND')) {
@@ -432,6 +438,44 @@ export function failJob(m: Model, ctx: Ctx, jobId: string, reason: string, colle
   if (!job.bulkId && c) notify(m, ctx, 'Discovery', `${c.canonicalName} discovery failed: ${reason}. Retry when the source is back.`, job.caseId);
   if (job.bulkId) maybeFinishBulk(m, ctx, job.bulkId);
   return j;
+}
+
+/**
+ * Keep what the "is the artist alive?" check found (an earlier decision stays while the answer is the same). When the
+ * artist has passed away and nobody decided yet, the search pauses here, before any search quota is spent. True = paused.
+ * Without a job (artists searched before the check existed) only the answer is kept and the artist page asks the question.
+ */
+export function recordLife(m: Model, ctx: Ctx, caseId: string, jobId: string | null, life: LifeCheck): boolean {
+  const c = m.get('cases', m.canonical(caseId));
+  const job = jobId ? m.get('discoveryJobs', jobId) : null;
+  if (!c || (jobId && !job)) return false;
+  const prev = c.life ?? null;
+  const kept = prev?.decision && prev.status === life.status ? { decision: prev.decision, decidedBy: prev.decidedBy, decidedAt: prev.decidedAt } : {};
+  m.update('cases', c.id, { life: { ...life, ...kept } });
+  if (prev?.status !== life.status || prev?.deathDate !== life.deathDate) {
+    audit(m, ctx, {
+      caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Checked: is the artist alive?', from: prev?.status ?? null,
+      to: life.status === 'Deceased' ? `Passed away (${diedText(life)})` : life.status === 'Alive' ? 'No date of death on record' : 'Not found in public records',
+      reason: life.label ? `${life.label}${life.description ? `: ${life.description}` : ''}` : 'Wikidata has no music person with this exact name', evidence: life.source,
+    });
+  }
+  const now = m.get('cases', c.id)!;
+  if (!lifeHold(now)) return false;
+  if (!job) {
+    syncDiscoveryState(m, ctx, c.id);
+    notify(m, ctx, 'Discovery', `${c.canonicalName} has passed away (${diedText(life)}). Open the artist to continue or remove.`, c.id);
+    return false;
+  }
+  const reason = `Paused: ${c.canonicalName} has passed away (${diedText(life)}). Decide first: continue anyway, or remove the artist.`;
+  m.update('discoveryJobs', job.id, {
+    status: 'FAILED', outcome: 'failed', failureReason: reason, finishedAt: ctx.now, durationMs: job.startedAt ? Date.parse(ctx.now) - Date.parse(job.startedAt) : null,
+    steps: job.steps.map((s, i) => (i === 0 ? { ...s, state: 'done' as const, detail: `Passed away (${diedText(life)}): waiting for a person` } : { ...s, state: 'skipped' as const })),
+  });
+  syncDiscoveryState(m, ctx, c.id);
+  audit(m, ctx, { caseId: c.id, entity: 'DiscoveryJob', entityId: job.id, action: 'Search paused: artist passed away', reason, evidence: life.source, result: 'No search quota used', next: 'Continue anyway, or remove the artist' });
+  notify(m, ctx, 'Discovery', `${c.canonicalName} has passed away (${diedText(life)}). Open the artist to continue or remove.`, c.id);
+  if (job.bulkId) maybeFinishBulk(m, ctx, job.bulkId);
+  return true;
 }
 
 export function maybeFinishBulk(m: Model, ctx: Ctx, bulkId: string) {

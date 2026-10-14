@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import { Engine, type Store } from '../src/domain/engine';
 import { Model, type Dirty, type Snapshot } from '../src/domain/model';
 import { upgradeWorkspace } from '../src/domain/upgrade';
-import { createApi } from '../src/server/app';
+import { DATABASE_DOWN, createApi, databaseDown } from '../src/server/app';
 import { Auth, LIMITS, MemoryAuthStore, SESSION_COOKIE, checkPassword, hashPassword, type AuthOptions } from '../src/server/auth';
 import { needsRehash, passwordProblem } from '../src/server/passwords';
 import { base32, fromBase32, openSecret, sealSecret, stepOf, totpCode, verifyTotp } from '../src/server/totp';
@@ -357,6 +357,22 @@ console.log('\nWhile the workspace is loading');
   check('…and so does every other route', (await fetch(`${base}/api/auth/state`)).status === 503);
   await engine.init(); ready = true;
   check('ready → health ok', (await fetch(`${base}/api/health`)).status === 200);
+  server.close();
+}
+
+console.log('\nDatabase not reachable (down, blocked or out of quota)');
+{
+  const engine = new Engine(new MemoryStore());
+  await engine.init();
+  const down = Object.assign(new Error('Can’t reach database server at `db.example:5432`'), { name: 'PrismaClientKnownRequestError', code: 'P1001' });
+  class DownStore extends MemoryAuthStore { override async accountByEmail(): Promise<never> { throw down; } }
+  const server = createApi(engine, new Auth(new DownStore(), engine)).listen(0);
+  await new Promise(r => server.once('listening', r));
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const res = await fetch(`${base}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: 'a@example.com', password: 'long-enough-password' }) });
+  const body = await res.json();
+  check('sign-in says the database cannot be reached (503), not a vague server error', res.status === 503 && body.error === DATABASE_DOWN, [res.status, body]);
+  check('other errors stay 500', !databaseDown(new Error('boom')) && databaseDown({ name: 'PrismaClientInitializationError' }));
   server.close();
 }
 

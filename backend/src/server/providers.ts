@@ -9,7 +9,9 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { normalizeProfileUrl, platformOf } from '../domain/discovery/normalize';
-import { InternalCatalogueProvider, offProviderSet, ProviderError, type CrawlResult, type DiscoveryProvider, type ProviderHit, type ProviderLimits, type ProviderSet } from '../domain/discovery/providers';
+import { pickLife, type WdEntity } from '../domain/life';
+import type { LifeCheck } from '../domain/types';
+import { InternalCatalogueProvider, offProviderSet, ProviderError, sleep, type CrawlResult, type DiscoveryProvider, type ProviderHit, type ProviderLimits, type ProviderSet } from '../domain/discovery/providers';
 import { parseQuery, type SearchRequest } from '../domain/discovery/queries';
 import type { Model } from '../domain/model';
 
@@ -86,7 +88,8 @@ export class SpotifyProvider implements DiscoveryProvider {
       for (const t of (await this.api(`search?type=track&limit=10&q=${encodeURIComponent(query)}`))?.tracks?.items ?? []) addTrack(t);
       if (!song) for (const a of (await this.api(`search?type=artist&limit=5&q=${encodeURIComponent(artistName)}`))?.artists?.items ?? []) {
         const hit: ProviderHit = byArtist.get(a.id) ?? { url: a.external_urls?.spotify, title: `${a.name} · Spotify`, snippet: '', displayName: a.name, platform: 'Spotify', tracks: [] };
-        hit.snippet = `Artist · ${a.followers?.total ?? 0} followers${a.genres?.length ? ` · ${a.genres.slice(0, 3).join(', ')}` : ''}`;
+        // Spotify leaves out followers for some apps: say nothing rather than “0 followers”.
+        hit.snippet = ['Artist', a.followers?.total != null ? `${a.followers.total} followers` : null, a.genres?.length ? a.genres.slice(0, 3).join(', ') : null].filter(Boolean).join(' · ');
         hit.description = hit.snippet; hit.followers = a.followers?.total ?? null;
         if (hit.url) byArtist.set(a.id, hit);
       }
@@ -215,6 +218,46 @@ export function limitsFromEnv(env: NodeJS.ProcessEnv) {
   return { web, youtube, spotify };
 }
 
+// ------------------------------------------------------------------ is the artist alive? (Wikidata, public, no key)
+const WIKIDATA = 'https://www.wikidata.org/w/api.php';
+const WD_HEADERS = { 'User-Agent': 'GAmplifyArtistFinder/2.7 (artist identity research; public data only)', Accept: 'application/json' };
+let wdNextAt = 0;
+const NOT_A_PERSON = /\b(film|movie|painting|sculpture|album|song|single|soundtrack|episode|television|tv series|book|novel|poem|journal|newspaper|village|city|town|river|district|state|temple|school|university|college|station|street|road|building|family name|given name|surname|disambiguation|wikimedia|scientific article|species|genus|ship|company|organization|award|festival|record label|band|musical group)\b/i;
+const MUSIC_HINT = /singer|music|composer|lyricist|rapper|vocalist|songwriter|playback|guitarist|pianist|drummer|percussion|flautist|violinist|tabla|sitar|sarod|santoor|veena|carnatic|hindustani|qawwal|ghazal|band|instrumentalist/i;
+/** Search Wikidata for the name (and the first alias), then read only the people in music it found. */
+export async function wikidataLife(names: string[]): Promise<LifeCheck | null> {
+  const get = async (params: Record<string, string>) => {
+    for (let attempt = 0; ; attempt++) {
+      // Wikidata asks for gentle use: one call at a time, about a second apart; a "slow down" (429) is waited out once
+      const wait = wdNextAt - Date.now();
+      wdNextAt = Math.max(Date.now(), wdNextAt) + 1200;
+      if (wait > 0) await sleep(wait);
+      const r = await fetch(`${WIKIDATA}?${new URLSearchParams({ ...params, format: 'json' })}`, { headers: WD_HEADERS, signal: AbortSignal.timeout(10_000) });
+      if (r.ok) {
+        const body = await r.json() as any;
+        if (body?.error) throw new ProviderError(`Wikidata: ${body.error.info ?? body.error.code}`);
+        return body;
+      }
+      if ((r.status === 429 || r.status >= 500) && attempt < 2) {
+        const after = Math.min(15, Number(r.headers.get('retry-after')) || 5 * (attempt + 1));
+        wdNextAt = Date.now() + after * 1000;
+        continue;
+      }
+      throw new ProviderError(`Wikidata answered ${r.status}`);
+    }
+  };
+  const found = new Set<string>();
+  for (const name of names.filter(Boolean).slice(0, 2)) {
+    const res = await get({ action: 'wbsearchentities', search: name, language: 'en', uselang: 'en', type: 'item', limit: '10' });
+    // people only (films, paintings, songs, places and the like are skipped); pickLife then checks they work in music
+    for (const hit of res.search ?? []) if (MUSIC_HINT.test(hit.description ?? '') || !NOT_A_PERSON.test(hit.description ?? '')) found.add(hit.id);
+  }
+  const now = new Date().toISOString();
+  if (!found.size) return pickLife(names, [], now);
+  const res = await get({ action: 'wbgetentities', ids: [...found].slice(0, 8).join('|'), props: 'labels|descriptions|aliases|claims|sitelinks', languages: 'en' });
+  return pickLife(names, Object.values(res.entities ?? {}) as WdEntity[], now);
+}
+
 /** Live providers for every credential in the environment; none configured → discovery is off (never invented results). */
 export function serverProviders(getModel: () => Model, env: NodeJS.ProcessEnv = process.env): ProviderSet {
   const live: DiscoveryProvider[] = [];
@@ -229,6 +272,9 @@ export function serverProviders(getModel: () => Model, env: NodeJS.ProcessEnv = 
   if (env.YOUTUBE_API_KEY) live.push(limit(new YouTubeProvider(env.YOUTUBE_API_KEY), limits.youtube));
   if (!live.length) return offProviderSet(getModel);
   if (env.CRAWLER_ENABLED !== '0') live.push(new PublicWebCrawler());
-  return { mode: 'live', providers: [new InternalCatalogueProvider(getModel), ...live], notes: [`Live search with ${live.map(p => p.label).join(', ')}. Only public data and permitted APIs are used.`] };
+  return {
+    mode: 'live', providers: [new InternalCatalogueProvider(getModel), ...live], notes: [`Live search with ${live.map(p => p.label).join(', ')}. Only public data and permitted APIs are used.`],
+    lifeCheck: env.LIFE_CHECK === 'off' ? undefined : wikidataLife,
+  };
 }
 export { normalizeProfileUrl };

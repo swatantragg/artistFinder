@@ -32,7 +32,11 @@ const app = createApi(engine, auth, { ready: () => ready });
 app.listen(PORT, () => console.log(`ArtistFinder API on http://localhost:${PORT} (loading the workspace…)`));
 
 const t = Date.now();
-engine.init().then(async how => {
+// One-time storage clean-up (V2.5.0): give the freed space back before loading. A failure only delays it to the next start.
+store.compactOnce()
+  .then(ms => { if (ms != null) console.log(`Database compacted (space of deleted rows given back) in ${Math.round(ms / 1000)} s`); })
+  .catch(e => console.error('Database compaction skipped:', String(e?.message ?? e).split('\n').pop()))
+  .then(() => engine.init()).then(async how => {
   await auth.init();
   ready = true;
   console.log(`Workspace ${how === 'created' ? 'created (empty: sign up, then upload an export on the Imports page)' : 'loaded from PostgreSQL'}: ${engine.m.count('cases')} artists (${Date.now() - t} ms)`);
@@ -40,6 +44,8 @@ engine.init().then(async how => {
   console.log(cfg.mode === 'live' ? `Artist discovery: LIVE search · ${cfg.providers.map(p => p.label).join(', ')}` : `Artist discovery: OFF · ${cfg.notes[0]}`);
   console.log(`Sign-up: ${auth.allowSignup ? 'open (an Admin approves each request)' : 'closed (only the first account, the System Owner, can sign up)'}`);
   console.log('Ready.');
+  // Artists searched before the "is the artist alive?" check existed are checked once, in the background.
+  engine.checkLives().then(n => { if (n) console.log(`Checked whether ${n} artist(s) already started are alive (public records).`); }).catch(e => console.error('Alive check skipped:', String(e?.message ?? e)));
   // Time-based checks (stale verified profiles reopen their artist) every six hours; expired sessions are removed.
   setInterval(() => { engine.maintain().catch(e => console.error('Maintenance failed:', e)); auth.cleanup().catch(e => console.error('Session cleanup failed:', e)); }, 6 * 3600_000).unref();
 }).catch(e => {

@@ -78,6 +78,9 @@ model ArtistCase {
   goongoonaloStatus      String   @default("PENDING")
   goongoonaloStatusAt    String?
   goongoonaloStatusBy    String?
+  greetings              String   @default("Unknown") // festival greetings consent: Unknown | Yes | No
+  life                   Json? // is the artist alive? (public records, checked by Find artist) and what a person decided
+  directory              Json? // the artist directory row (Admin Studio export): songs, followers, verified, core member, social link research
   createdAt              String
   updatedAt              String
 
@@ -93,6 +96,7 @@ model ArtistCase {
   profiles         ArtistProfile[]
   verifiedProfiles VerifiedProfile[]
   statusEvents     StatusEvent[]
+  messages         OutreachMessage[]
 
   @@index([lifecycleStage])
   @@index([discoveryStatus])
@@ -348,6 +352,9 @@ model ContactAttempt {
   nextAction     String
   nextActionDate String?
   ownerId        String
+  undoneAt       String? // undone by a person (Undo last step / Reset): kept for the history, ignored by the workflow
+  undoneBy       String?
+  undoReason     String?
 
   @@index([caseId])
   @@map("contact_attempts")
@@ -399,6 +406,9 @@ model ClaimEvent {
   evidence       String
   actorId        String
   source         String // User | Import
+  undoneAt       String? // undone by a person (Undo last step / Reset): kept for the history, ignored by the workflow
+  undoneBy       String?
+  undoReason     String?
 
   @@index([caseId])
   @@map("claim_events")
@@ -418,6 +428,9 @@ model ActivationEvent {
   evidence        String
   result          String?
   actorId         String
+  undoneAt        String? // undone by a person (Undo last step / Reset)
+  undoneBy        String?
+  undoReason      String?
 
   @@index([caseId])
   @@map("activation_events")
@@ -768,4 +781,33 @@ model AuthSession {
 
   @@index([userId])
   @@map("auth_sessions")
+}
+
+// Messages: direct messages a person sent on the artist's verified Instagram, X or Facebook profile.
+model OutreachMessage {
+  id          String     @id
+  caseId      String
+  artistCase  ArtistCase @relation(fields: [caseId], references: [id])
+  kind        String // invite | member | followup | greeting
+  sequenceId  String // first message of the sequence; follow-ups share it
+  followUpNo  Int
+  templateId  String?
+  festivalId  String?
+  platform    String // Instagram | X | Facebook
+  profileUrl  String
+  handle      String
+  text        String
+  sentAt      String
+  sentBy      String
+  attemptId   String?
+  outcome     String?
+  outcomeAt   String?
+  outcomeBy   String?
+  undoneAt       String? // undone by a person (Undo last step / Reset): kept for the history, ignored by the workflow
+  undoneBy       String?
+  undoReason     String?
+
+  @@index([caseId])
+  @@index([sentBy, sentAt])
+  @@map("outreach_messages")
 }

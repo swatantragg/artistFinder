@@ -1,12 +1,12 @@
 // Dossier tabs about who the artist is and how to reach them: overview, songs & credits, collaborators, routes, research.
 import { matchesText } from '@domain/search';
-import { ChevronRight, ExternalLink, Plus, Search } from 'lucide-react';
+import { ChevronRight, ExternalLink, Plus, Search, Trash2 } from 'lucide-react';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { CHECKLIST_STATUSES } from '@domain/constants';
 import { useActions } from '../../components/actions';
 import { RouteChain, TaskCard } from '../../components/case-bits';
-import { Badge, Button, Card, DataTable, Empty, KeyVal, Modal, Notice, Pagination, SkeletonRows, StageBadge, StatusBadge, cx } from '../../components/ui';
+import { Badge, Button, Card, DataTable, Empty, KeyVal, Modal, Notice, Pagination, Select, SkeletonRows, StageBadge, StatusBadge, cx } from '../../components/ui';
 import { useApp, useQuery } from '../../lib/app';
 import { fmtAgo, fmtDate, fmtDateTime, num } from '../../lib/format';
 import type { CaseDetail } from './Dossier';
@@ -104,9 +104,7 @@ export function SongsTab({ id }: { id: string }) {
           <Search size={17} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-faint" />
           <input className="field !pl-10" value={q} onChange={e => { setQ(e.target.value); setPage(1); }} placeholder="Search songs: title, ISRC, album, label or a person" aria-label="Search songs" />
         </div>
-        <select className="field !w-auto" value={sort} onChange={e => setSort(e.target.value as SongSort)} aria-label="Sort songs">
-          <option value="release">Newest release first</option><option value="title">Title A–Z</option><option value="imported">Order imported</option>
-        </select>
+        <Select size="sm" className="!w-auto min-w-[13rem]" ariaLabel="Sort songs" value={sort} onChange={v => setSort(v as SongSort)} options={[{ value: 'release', label: 'Newest release first' }, { value: 'title', label: 'Title A–Z' }, { value: 'imported', label: 'Order imported' }]} />
         {addBtn}
       </div>
       <p className="mb-2 text-xs text-muted">{needle ? `${num(list.length)} of ${num(data.length)} songs match “${q.trim()}”` : `${num(data.length)} songs`} · click a song for its details</p>
@@ -249,13 +247,15 @@ export function RoutesTab({ d }: { d: CaseDetail }) {
   const add = <Button size="sm" icon={<Plus size={14} />} onClick={() => open('addRoute', { caseId: d.case.id })}>Add route</Button>;
   if (!data) return <SkeletonRows />;
   const closed = ['Closed', 'Claimed', 'Activation Pending', 'Activated', 'Ongoing ARM'].includes(d.case.lifecycleStage);
+  const direct = d.actions.some(a => a.id === 'recordContact' && !a.disabled);
   return (
     <>
       <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-xs text-muted">A route is a path to the artist. Failed routes are kept with the reason, so nobody repeats them.</p>
+        <p className="text-xs text-muted">A route is a go-between who can reach the artist for you: a manager, label, collaborator or a profile link. To message the artist yourself, use Record contact → “Direct”. Failed routes are kept with the reason, so nobody repeats them.</p>
         {!closed && add}
       </div>
-      {!data.length ? <Empty title="No verified routes found." text="Research the artist’s profiles and credits, then add a route." action={!closed ? add : undefined} /> : (
+      {!data.length ? <Empty title="No routes yet." text={direct ? 'Message the artist yourself on a verified profile (Record contact → Direct), or add a go-between as a route.' : d.v2.summary.verifiedProfiles > 0 ? 'No go-between is needed: contact happens directly on the artist’s verified profiles.' : 'Verify the artist’s profiles first, or add a go-between as a route.'}
+        action={!closed ? <span className="flex flex-wrap justify-center gap-2">{direct && <Button size="sm" variant="primary" onClick={() => open('recordContact', { caseId: d.case.id })}>Record contact</Button>}{add}</span> : undefined} /> : (
         <div className="space-y-2.5">
           {data.map(r => (
             <div key={r.id} className={cx('rounded-lg border px-4 py-3', r.state === 'Selected' ? 'border-[var(--t-green-bd)] bg-[var(--t-green-bg)]/40' : 'border-line', (r.state === 'Rejected' || r.state === 'Exhausted') && 'opacity-75')}>
@@ -264,15 +264,16 @@ export function RoutesTab({ d }: { d: CaseDetail }) {
                   <div className="mb-2 flex items-center gap-2"><span className="mono text-sm font-medium">{r.id}</span><StatusBadge value={r.state} /><span className="text-xs text-muted">Confidence {r.confidence}% · from {r.origin}</span></div>
                   <RouteChain chain={r.chain} />
                 </div>
-                {!closed && (
-                  <div className="flex shrink-0 flex-wrap gap-1.5">
+                <div className="flex shrink-0 flex-wrap gap-1.5">
+                  {!closed && <>
                     {(r.state === 'Verified' || r.state === 'Selected') && <Button size="sm" variant={r.state === 'Verified' ? 'primary' : 'secondary'} onClick={() => open('recordContact', { caseId: d.case.id, routeId: r.id })}>Record contact</Button>}
                     {r.state === 'Verified' && <Button size="sm" onClick={() => open('selectRoute', { caseId: d.case.id, routeId: r.id })}>Select</Button>}
                     {r.state === 'Candidate' && <Button size="sm" onClick={() => open('verifyRoute', { caseId: d.case.id, routeId: r.id })}>Mark verified</Button>}
                     {!['Rejected', 'Exhausted'].includes(r.state) && <Button size="sm" variant="ghost" onClick={() => open('rejectRoute', { caseId: d.case.id, routeId: r.id })}>Reject</Button>}
                     {['Verified', 'Selected'].includes(r.state) && <Button size="sm" variant="ghost" onClick={() => open('exhaustRoute', { caseId: d.case.id, routeId: r.id })}>Exhausted</Button>}
-                  </div>
-                )}
+                  </>}
+                  <Button size="sm" variant="ghost" icon={<Trash2 size={14} />} onClick={() => open('deleteRoute', { caseId: d.case.id, routeId: r.id })} title="Delete this route">Delete</Button>
+                </div>
               </div>
               <dl className="mt-3 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2 lg:grid-cols-4">
                 {([

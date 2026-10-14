@@ -4,15 +4,18 @@ import { ACTIVE_JOB_STATUSES, ARTIST_STATUSES, ARTIST_STATUS_INFO, GOONGOONALO_I
 import { duplicateEvidence } from './dedupe';
 import type { Model } from './model';
 import { userName } from './ops';
-import { isVerified, reopenReasons } from './status';
+import { inVerification, isVerified, reopenReasons } from './status';
+import { lifeHold } from './life';
 import type { ArtistCase, Ctx } from './types';
 import { matchTier, sameId, searchKey, searchQuery, TIER } from './search';
+import { optOutOf, outreachSummary } from './messages';
 import { addDays, nameKey, normIsrc } from './util';
 
 // ------------------------------------------------------------------ cached aggregates
-const cache = new WeakMap<Model, { v: number; songs: Map<string, number>; jobs: Map<string, string | null> }>();
+interface Aggregates { v: number; songs: Map<string, number>; jobs: Map<string, string | null>; followers: Map<string, number>; ranks: Map<string, Map<string, number>> }
+const cache = new WeakMap<Model, Aggregates>();
 export function artistAggregates(m: Model) { return aggregates(m); }
-function aggregates(m: Model) {
+function aggregates(m: Model): Aggregates {
   const hit = cache.get(m);
   if (hit && hit.v === m.version) return hit;
   const sets = new Map<string, Set<string>>();
@@ -24,13 +27,48 @@ function aggregates(m: Model) {
   }
   const songs = new Map<string, number>();
   for (const [k, s] of sets) songs.set(k, s.size);
+  // the artist directory knows the full Goongoonalo song count (titles on file can be fewer): the bigger number counts
+  for (const c of m.data.cases.values()) if (!c.mergedIntoId && (c.directory?.songs ?? 0) > (songs.get(c.id) ?? 0)) songs.set(c.id, c.directory!.songs);
   const jobs = new Map<string, string | null>();
   for (const j of m.data.discoveryJobs.values()) if (j.finishedAt && j.status !== 'CANCELLED' && (jobs.get(j.caseId) ?? '') < j.finishedAt) jobs.set(j.caseId, j.finishedAt);
-  const out = { v: m.version, songs, jobs };
+  // Followers: the biggest count on the artist's profiles (verified or still to review; rejected ones are someone else).
+  const followers = new Map<string, number>();
+  for (const p of m.data.profiles.values()) {
+    if (!p.caseId || p.followers == null || p.verificationStatus === 'REJECTED' || p.verificationStatus === 'REPLACED') continue;
+    const id = m.canonical(p.caseId);
+    if (p.followers > (followers.get(id) ?? -1)) followers.set(id, p.followers);
+  }
+  for (const c of m.data.cases.values()) if (!c.mergedIntoId && c.directory && c.directory.followers > 0 && c.directory.followers > (followers.get(c.id) ?? -1)) followers.set(c.id, c.directory.followers);
+  const out: Aggregates = { v: m.version, songs, jobs, followers, ranks: new Map() };
   cache.set(m, out);
   return out;
 }
 const live = (m: Model) => m.all('cases').filter(c => !c.mergedIntoId);
+
+/** The Artists list opens on the top artists: this many, then the rest. */
+export const TOP_ARTISTS = 250;
+const byName = new Intl.Collator(undefined, { sensitivity: 'base', numeric: true }).compare;
+/** A → Z looks at the first letter or digit: “_Vinny”, “'Chiyaan' Vikram” and “$$Pacexkid” sort under V, C and P. */
+const alphaKey = (name: string) => name.replace(/^[^\p{L}\p{N}]+/u, '') || name;
+/** Rank of every artist (kind Artist) in the top-artists order; songs per artist. */
+export function artistRanks(m: Model): Map<string, number> { return ranksOf(m, aggregates(m), 'Artist'); }
+export function songCounts(m: Model): Map<string, number> { return aggregates(m).songs; }
+/** The top artists (most songs, then followers, then A–Z): the Artists list opens on them and the graph is kept for them. */
+export function topArtistIds(m: Model): string[] { return [...artistRanks(m)].filter(([, r]) => r <= TOP_ARTISTS).map(([id]) => id); }
+/** Rank 1 = the artist with the most songs; equal songs → more followers first; then A–Z. One ranking per kind. */
+function ranksOf(m: Model, agg: Aggregates, kind: 'Artist' | 'Collaborator' | 'Label' | null): Map<string, number> {
+  const k = kind ?? 'all';
+  let r = agg.ranks.get(k);
+  if (!r) {
+    const { songs, followers } = agg;
+    // a rejected artist (not a real artist, or passed away and removed) has no rank: the next one by songs moves up
+    const list = live(m).filter(c => !c.rejectedAt && (!kind || c.kind === kind)).sort((a, b) => (songs.get(b.id) ?? 0) - (songs.get(a.id) ?? 0)
+      || (followers.get(b.id) ?? 0) - (followers.get(a.id) ?? 0) || byName(a.canonicalName, b.canonicalName) || a.id.localeCompare(b.id));
+    r = new Map(list.map((c, i) => [c.id, i + 1]));
+    agg.ranks.set(k, r);
+  }
+  return r;
+}
 
 /** Distinct people credited with the artist on its songs (not the artist itself). */
 export function collaboratorCount(m: Model, caseId: string): number {
@@ -98,9 +136,11 @@ export interface ArtistRow {
   id: string; name: string; aliases: string[]; sourceIds: string[]; kind: string; songs: number; collaborators: number;
   artistStatus: ArtistStatus; discoveryStatus: string; goongoonaloStatus: GoongoonaloStatus; lastDiscovery: string | null; lastEvidence: string | null; lastEvidenceNote: string | null;
   action: { id: string; label: string } | null; matched: string | null; owner: string; reopenReasons: number; verifiedPlatforms: string[];
+  rank: number | null; followers: number | null; core: boolean;
 }
 /** The one thing to do next for this artist (shown as the row's action). */
 export function actionFor(m: Model, c: ArtistCase): { id: string; label: string } | null {
+  if (lifeHold(c)) return { id: 'openArtist', label: 'Passed away: continue or remove?' };
   switch (c.artistStatus) {
     case 'NEW': return { id: 'findArtist', label: 'Find artist' };
     case 'SEARCHING': return { id: 'viewDiscovery', label: 'View progress' };
@@ -115,37 +155,49 @@ export function actionFor(m: Model, c: ArtistCase): { id: string; label: string 
     default: return null;
   }
 }
-function artistRow(m: Model, c: ArtistCase, songs: Map<string, number>, jobs: Map<string, string | null>, matched: string | null): ArtistRow {
+function artistRow(m: Model, c: ArtistCase, agg: Aggregates, ranks: Map<string, number>, matched: string | null): ArtistRow {
+  const { songs, jobs } = agg;
   return {
     id: c.id, name: c.canonicalName, aliases: c.aliases, sourceIds: c.backendProfileIds, kind: c.kind, songs: songs.get(c.id) ?? 0, collaborators: 0,
+    rank: ranks.get(c.id) ?? null, followers: agg.followers.get(c.id) ?? null, core: !!c.directory?.core,
     artistStatus: c.artistStatus, discoveryStatus: c.discoveryStatus, goongoonaloStatus: c.goongoonaloStatus, lastDiscovery: jobs.get(c.id) ?? null,
     lastEvidence: c.lastEvidenceChange, lastEvidenceNote: c.lastEvidenceNote, action: actionFor(m, c), matched, owner: userName(m, c.ownerId),
     reopenReasons: reopenReasons(c).length, verifiedPlatforms: [...new Set(m.byCase('verifiedProfiles', c.id).filter(v => v.verificationStatus === 'VERIFIED').map(v => v.platform))],
   };
 }
-export interface ArtistFilters { status?: string; kind?: string; q?: string; goongoonalo?: string; stage?: string; sort?: string; dir?: 'asc' | 'desc'; page?: number; pageSize?: number }
+export interface ArtistFilters { status?: string; kind?: string; q?: string; goongoonalo?: string; stage?: string; scope?: 'top' | 'all'; sort?: string; dir?: 'asc' | 'desc'; page?: number; pageSize?: number }
 
 export const v2Views = {
   artists(m: Model, _ctx: Ctx, f: ArtistFilters = {}) {
-    const { songs, jobs } = aggregates(m);
-    const kind = f.kind === 'Collaborator' ? 'Collaborator' : f.kind === 'all' ? null : 'Artist';
+    const agg = aggregates(m);
+    const { songs, jobs } = agg;
+    const kind = f.kind === 'Collaborator' ? 'Collaborator' : f.kind === 'Label' ? 'Label' : f.kind === 'all' ? null : 'Artist';
     const found = f.q ? searchArtists(m, f.q) : null;
-    const pool = live(m).filter(c => (!kind || c.kind === kind) && (!found || found.has(c.id)) && (!f.goongoonalo || c.goongoonaloStatus === f.goongoonalo) && (!f.stage || c.lifecycleStage === f.stage));
+    const ranks = ranksOf(m, agg, kind);
+    // Top artists only, unless asked for everyone. A search always looks through every artist.
+    const top = f.scope !== 'all' && !found;
+    // Only artists not started yet: once Find artist runs (or a person verifies them) they move to Verified Artists.
+    // A search still finds everyone; the Rejected filter shows the rejected ones (they have no rank).
+    const rejected = f.status === 'REJECTED';
+    // (labels and collaborators are only for finding: every one of them is listed)
+    const here = (c: ArtistCase) => (rejected ? !!c.rejectedAt : !c.rejectedAt && (kind !== 'Artist' || !inVerification(c)));
+    const pool = live(m).filter(c => (!kind || c.kind === kind) && (rejected || !top || (ranks.get(c.id) ?? Infinity) <= TOP_ARTISTS) && (!found || found.has(c.id))
+      && (!!found || !!f.stage || here(c)) && (!f.goongoonalo || c.goongoonaloStatus === f.goongoonalo) && (!f.stage || c.lifecycleStage === f.stage));
+    const moved = found || kind !== 'Artist' ? 0 : live(m).filter(c => c.kind === kind && (!top || (ranks.get(c.id) ?? Infinity) <= TOP_ARTISTS) && inVerification(c)).length;
+    const rejectedCount = found ? 0 : live(m).filter(c => (!kind || c.kind === kind) && !!c.rejectedAt).length;
     const counts = Object.fromEntries(['ALL', ...ARTIST_STATUSES].map(s => [s, 0])) as Record<string, number>;
     for (const c of pool) { counts.ALL++; counts[c.artistStatus]++; }
-    let list = pool.filter(c => !f.status || f.status === 'ALL' || c.artistStatus === f.status);
+    let list = pool.filter(c => !f.status || f.status === 'ALL' || rejected || c.artistStatus === f.status);
     const dir = f.dir === 'asc' ? 1 : -1;
-    const key = f.sort ?? (found ? 'match' : 'attention');
-    // What needs a person first: candidates to review, reopened artists, running searches, new artists … then most songs.
-    const ATTENTION: Record<ArtistStatus, number> = { NEEDS_REVIEW: 0, REOPENED: 1, SEARCHING: 2, NEW: 3, PENDING: 4, VERIFIED: 5, REJECTED: 6 };
+    const key = f.sort ?? (found ? 'match' : 'rank');
     // Best match first: the ID, the exact name, a name containing the words, an alias or ISRC, a profile, then songs/albums/labels.
     const rank = (c: ArtistCase) => found?.get(c.id)?.rank ?? 99;
     if (key === 'match') list.sort((a, b) => rank(a) - rank(b) || (songs.get(b.id) ?? 0) - (songs.get(a.id) ?? 0) || a.id.localeCompare(b.id));
-    else if (key === 'attention') list.sort((a, b) => ATTENTION[a.artistStatus] - ATTENTION[b.artistStatus] || (songs.get(b.id) ?? 0) - (songs.get(a.id) ?? 0) || a.canonicalName.localeCompare(b.canonicalName));
+    else if (key === 'rank') list.sort((a, b) => (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity));
     else list.sort((a, b) => {
       let d = 0;
       switch (key) {
-        case 'name': d = a.canonicalName.localeCompare(b.canonicalName); break;
+        case 'name': d = byName(alphaKey(a.canonicalName), alphaKey(b.canonicalName)); break;
         case 'id': d = a.id.localeCompare(b.id, undefined, { numeric: true }); break;
         case 'songs': d = (songs.get(a.id) ?? 0) - (songs.get(b.id) ?? 0); break;
         case 'lastDiscovery': d = (jobs.get(a.id) ?? '').localeCompare(jobs.get(b.id) ?? ''); break;
@@ -155,16 +207,37 @@ export const v2Views = {
       return d * dir || a.id.localeCompare(b.id);
     });
     const pageSize = Math.min(100, f.pageSize ?? 25), page = Math.max(1, f.page ?? 1);
-    const rows = list.slice((page - 1) * pageSize, page * pageSize).map(c => ({ ...artistRow(m, c, songs, jobs, found?.get(c.id)?.why || null), collaborators: collaboratorCount(m, c.id) }));
-    const kinds = { Artist: 0, Collaborator: 0 };
-    for (const c of live(m)) if (!found || found.has(c.id)) kinds[c.kind]++;
-    return { rows, total: list.length, page, pageSize, counts, kinds, statusInfo: ARTIST_STATUS_INFO };
+    const rows = list.slice((page - 1) * pageSize, page * pageSize).map(c => ({ ...artistRow(m, c, agg, ranks, found?.get(c.id)?.why || null), collaborators: collaboratorCount(m, c.id) }));
+    const kinds = { Artist: 0, Collaborator: 0, Label: 0 };
+    for (const c of live(m)) if (!c.rejectedAt && (!found || found.has(c.id))) kinds[c.kind]++;
+    if (top) { kinds.Artist = Math.min(kinds.Artist, TOP_ARTISTS); kinds.Collaborator = Math.min(kinds.Collaborator, TOP_ARTISTS); kinds.Label = Math.min(kinds.Label, TOP_ARTISTS); }
+    return { rows, total: list.length, page, pageSize, counts, kinds, scope: top ? 'top' : 'all', topSize: TOP_ARTISTS, everyone: ranks.size, statusInfo: ARTIST_STATUS_INFO, moved, rejected: rejectedCount };
   },
 
-  verifiedArtists(m: Model, _ctx: Ctx, f: { q?: string; goongoonalo?: string; page?: number; pageSize?: number } = {}) {
-    const { songs } = aggregates(m);
+  verifiedArtists(m: Model, ctx: Ctx, f: { q?: string; goongoonalo?: string; page?: number; pageSize?: number; view?: string; status?: string } = {}) {
+    const agg = aggregates(m);
+    const { songs } = agg;
     const found = f.q ? searchArtists(m, f.q) : null;
-    const pool = live(m).filter(c => isVerified(c) && !c.rejectedAt && (!found || found.has(c.id)));
+    // Two lists: In progress (Find artist started, not verified yet) and Verified. Artists move here from Artists.
+    const started = live(m).filter(c => !c.rejectedAt && (!found || found.has(c.id)));
+    // a verified artist who turns out to have passed away is listed here too until a person decides
+    const progressPool = started.filter(c => inVerification(c) && (!isVerified(c) || lifeHold(c)));
+    const views = { progress: progressPool.length, verified: started.filter(isVerified).length, decide: progressPool.filter(lifeHold).length };
+    if (f.view === 'progress') {
+      const ranks = artistRanks(m);
+      const counts: Record<string, number> = { ALL: progressPool.length, DECIDE: views.decide };
+      for (const c of progressPool) if (!lifeHold(c)) counts[c.artistStatus] = (counts[c.artistStatus] ?? 0) + 1;
+      const order = (c: ArtistCase) => (lifeHold(c) ? 0 : c.artistStatus === 'NEEDS_REVIEW' ? 1 : c.artistStatus === 'SEARCHING' ? 2 : 3);
+      const list = progressPool.filter(c => !f.status || f.status === 'ALL' || (f.status === 'DECIDE' ? lifeHold(c) : !lifeHold(c) && c.artistStatus === f.status))
+        .sort((a, b) => order(a) - order(b) || (ranks.get(a.id) ?? Infinity) - (ranks.get(b.id) ?? Infinity) || byName(a.canonicalName, b.canonicalName));
+      const pageSize = Math.min(100, f.pageSize ?? 25), page = Math.max(1, f.page ?? 1);
+      const rows = list.slice((page - 1) * pageSize, page * pageSize).map(c => ({
+        id: c.id, name: c.canonicalName, sourceIds: c.backendProfileIds, songs: songs.get(c.id) ?? 0, rank: ranks.get(c.id) ?? null, artistStatus: c.artistStatus, discoveryStatus: c.discoveryStatus,
+        action: actionFor(m, c), lastDiscovery: agg.jobs.get(c.id) ?? null, life: c.life ?? null, owner: userName(m, c.ownerId),
+      }));
+      return { view: 'progress', views, rows, total: list.length, page, pageSize, counts, info: GOONGOONALO_INFO };
+    }
+    const pool = started.filter(c => isVerified(c) && (f.status !== 'REOPENED' || c.artistStatus === 'REOPENED'));
     const counts = Object.fromEntries(['ALL', ...GOONGOONALO_STATUSES].map(s => [s, 0])) as Record<string, number>;
     for (const c of pool) { counts.ALL++; counts[c.goongoonaloStatus]++; }
     const lastVerified = (c: ArtistCase) => m.byCase('verifiedProfiles', c.id).filter(v => v.verificationStatus === 'VERIFIED').map(v => v.verifiedAt).sort().pop() ?? c.manualVerifiedAt ?? c.firstVerifiedAt;
@@ -178,9 +251,10 @@ export const v2Views = {
         goongoonaloAt: c.goongoonaloStatusAt, goongoonaloBy: c.goongoonaloStatusBy ? userName(m, c.goongoonaloStatusBy) : null,
         platforms: vps.map(v => ({ platform: v.platform, username: v.username, url: v.url })), verifiedVia: vps.length ? 'Profiles' : c.claimStatus === 'Completed' ? 'Backend claim' : 'Confirmed by a person',
         lastVerified: lastVerified(c), stage: c.lifecycleStage, claimStatus: c.claimStatus, activationStatus: c.activationStatus, reopen: reopenReasons(c).length,
+        optOut: optOutOf(c), greetings: c.greetings ?? 'Unknown', outreach: outreachSummary(m, c, ctx.today), life: c.life ?? null,
       };
     });
-    return { rows, total: list.length, page, pageSize, counts, info: GOONGOONALO_INFO };
+    return { view: 'verified', views, rows, total: list.length, page, pageSize, counts, info: GOONGOONALO_INFO };
   },
 
   dedupeQueue(m: Model, _ctx: Ctx, p: { status?: 'open' | 'later' | 'decided'; page?: number; pageSize?: number } = {}) {

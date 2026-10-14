@@ -2,7 +2,8 @@
 // the connection graph, live job progress and the artists named in an import file.
 import { matchTier, sameId, searchQuery } from '../search';
 import { ACTIVE_JOB_STATUSES, DISCOVERY_CASE_STATUSES, STRENGTH_LABEL, type DiscoveryStrength } from '../constants';
-import { caseGraph } from '../graph';
+import { caseGraph, inGraphScope } from '../graph';
+import { TOP_ARTISTS } from '../views';
 import type { Model } from '../model';
 import { userName } from '../ops';
 import type { ArtistProfile, ConnectionPath, Ctx, DiscoveryJob, QueryKind } from '../types';
@@ -194,10 +195,11 @@ export const discoveryViews = {
     return (m.idx.queriesByJob.get(p.jobId) ?? []).map(id => m.get('discoveryQueries', id)!).filter(Boolean).map(q => ({ id: q.id, provider: q.provider, query: q.query, kind: KIND_LABEL[q.kind] ?? q.kind, subject: q.subject, status: q.status, results: q.resultCount, error: q.error }));
   },
 
-  caseGraph(m: Model, _ctx: Ctx, p: { id: string; depth?: number; expand?: string[]; pathId?: string }) {
+  caseGraph(m: Model, _ctx: Ctx, p: { id: string; expand?: string[]; pathId?: string }) {
     const c = m.get('cases', m.canonical(p.id));
     if (!c) return null;
-    return { ...caseGraph(m, c.id, { depth: p.depth, expand: p.expand, pathId: p.pathId }), caseId: c.id, name: c.canonicalName, contactPreference: c.contactPreference };
+    // The graph is kept for the top artists only; for the others the screen says so.
+    return { ...caseGraph(m, c.id, { expand: p.expand, pathId: p.pathId }), caseId: c.id, name: c.canonicalName, contactPreference: c.contactPreference, inScope: inGraphScope(m, c.id), topSize: TOP_ARTISTS };
   },
 
 

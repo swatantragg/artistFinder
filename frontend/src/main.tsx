@@ -8,7 +8,8 @@ import { ActionHost } from './components/actions';
 import { Layout } from './components/Layout';
 import { Empty } from './components/ui';
 import { AppProvider } from './lib/app';
-import { AuditPage, ReportsPage, SettingsPage, applyStoredTheme } from './pages/Admin';
+import { AuditPage, ReportsPage, SettingsPage } from './pages/Admin';
+import { applyPrefs } from './lib/prefs';
 import Artists from './pages/Artists';
 import { AuthPage } from './pages/Auth';
 import Dashboard from './pages/Dashboard';
@@ -19,6 +20,8 @@ import Imports from './pages/Imports';
 import { ResearchPage, RoutesPage } from './pages/Overviews';
 import Queue from './pages/Queue';
 import VerifiedArtists from './pages/VerifiedArtists';
+import Messages from './pages/Messages';
+import Status from './pages/Status';
 import './styles.css';
 
 /** Old links (bookmarks, notifications) keep working: they open the same thing in the artist-centric layout. */
@@ -30,7 +33,7 @@ function ToArtist({ tab }: { tab?: string }) {
   return <Navigate to={`/artists/${id}${q.toString() ? `?${q}` : ''}`} replace />;
 }
 
-applyStoredTheme();
+applyPrefs();
 
 function Boot() {
   const [auth, setAuth] = useState<AuthState | null>(null);
@@ -61,6 +64,8 @@ function Boot() {
               <Route path="/artists/:id" element={<Dossier />} />
               <Route path="/deduplicate" element={<Deduplicate />} />
               <Route path="/verified" element={<VerifiedArtists />} />
+              <Route path="/messages" element={<Messages />} />
+              <Route path="/status" element={<Status />} />
               <Route path="/imports" element={<Imports />} />
               <Route path="/imports/:id" element={<ImportResult />} />
               <Route path="/settings" element={<SettingsPage />} />
@@ -76,7 +81,7 @@ function Boot() {
               <Route path="/discovery" element={<Navigate to="/artists" replace />} />
               <Route path="/discovery/:id" element={<ToArtist tab="evidence" />} />
               <Route path="/identity" element={<Navigate to="/deduplicate" replace />} />
-              <Route path="/reopened" element={<Navigate to="/artists?status=REOPENED" replace />} />
+              <Route path="/reopened" element={<Navigate to="/verified?status=REOPENED" replace />} />
               <Route path="/claims" element={<Navigate to="/verified" replace />} />
               <Route path="*" element={<Empty title="Page not found." text="Use the menu on the left." />} />
             </Routes>

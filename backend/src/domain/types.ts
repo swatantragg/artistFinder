@@ -1,6 +1,6 @@
 // Typed models. They mirror prisma/schema.prisma one-to-one, so the in-memory model and PostgreSQL hold the same shapes.
 // Dates are ISO strings: timestamps "2026-10-02T15:20:00.000Z", calendar dates "2026-10-02".
-import type { ArtistKind, ArtistStatus, GoongoonaloStatus } from './constants';
+import type { ArtistKind, ArtistStatus, GoongoonaloStatus, GreetingsConsent, MessageKind, MessagePlatform, ReplyOutcome } from './constants';
 import type {
   ActivationStatus, AttemptResult, Channel, ChecklistStatus, ClaimStatus, ContactPreference, CreditRole, DiscoveryCaseStatus, DiscoveryJobStatus,
   DiscoveryMode, DiscoveryStrength, EdgeStatus, EvidenceKind, GraphNodeType, IdentityStatus, ImportClass, LifecycleStage, Platform, Priority,
@@ -85,6 +85,12 @@ export interface ArtistCase {
   goongoonaloStatus: GoongoonaloStatus;
   goongoonaloStatusAt: string | null;
   goongoonaloStatusBy: string | null;
+  /** Festival greetings: only with a yes from the artist ("Stop greetings" sets No). Missing = Unknown. */
+  greetings?: GreetingsConsent;
+  /** Is the artist alive? Checked at the start of Find artist (public records); a person decides when they passed away. */
+  life?: LifeCheck | null;
+  /** What the artist directory (Admin Studio export) says about the artist: song count, audience, flags, research. */
+  directory?: DirectoryFacts | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -105,6 +111,8 @@ export interface ImportSummary {
   claimChanges: number;
   activationChanges: number;
   identityExceptions: number;
+  /** artist directory imports: what the extra columns did */
+  directory?: { profiles: number; members: number; deceased: number; notIndividual: number; labels: number; placeholders?: number; noneFound: number; core: number; songs: number };
   errors: string[];
   warnings: string[];
   classes: Record<ImportClass, number>;
@@ -307,6 +315,8 @@ export interface ContactAttempt {
   nextAction: string;
   nextActionDate: string | null;
   ownerId: string;
+  /** Undone by a person (Undo last step / Reset): kept for the history, ignored by the workflow. */
+  undoneAt?: string | null; undoneBy?: string | null; undoReason?: string | null;
 }
 
 export interface TaskNote { at: string; by: string; text: string; kind: 'note' | 'evidence' | 'change' }
@@ -354,6 +364,7 @@ export interface ClaimEvent {
   evidence: string;
   actorId: string;
   source: 'User' | 'Import';
+  undoneAt?: string | null; undoneBy?: string | null; undoReason?: string | null;
 }
 
 export type ActivationEventType = 'Access Verified' | 'Feature Selected' | 'Login Only' | 'Meaningful Use' | 'Backend Activity'
@@ -371,7 +382,7 @@ export interface ActivationEvent {
   backendRef: string | null;
   evidence: string;
   result: string | null;
-  actorId: string;
+  actorId: string;  undoneAt?: string | null; undoneBy?: string | null; undoReason?: string | null;
 }
 
 export interface ReopenEvent {
@@ -491,6 +502,36 @@ export interface DiscoveryResult {
 
 export interface FoundVia { jobId: string; version: number; provider: string; query: string; kind: QueryKind }
 /** A public profile that may belong to an artist. Created by discovery, decided by a person. */
+/** One row of the artist directory (Admin Studio export, e.g. Goongoonalo_artist_names_social_with_songs.xlsx). */
+export interface DirectoryFacts {
+  songs: number;                  // songs in the Goongoonalo catalogue (ranks the artist when more than the songs on file)
+  followers: number;
+  listeners: number;
+  verified: boolean;              // "Verified = Yes" in Admin Studio: the artist is on Goongoonalo
+  core: boolean;                  // "Core member = Yes"
+  link: string;                   // the social link cell: a URL, "none found", "n/a - deceased", "not researched" …
+  confidence: number | null;
+  basis: string;
+  batchId: string;
+  sheet: string;
+  row: number;
+}
+
+/** Result of the "is the artist alive?" check (Wikidata: a human in music with that name, and a date of death or not). */
+export interface LifeCheck {
+  status: 'Deceased' | 'Alive' | 'Unknown';   // Alive = a matching musician with no date of death on record
+  deathDate: string | null;                   // YYYY-MM-DD (or YYYY when only the year is known)
+  birthDate: string | null;
+  label: string | null;                       // the matching record, e.g. "Lata Mangeshkar"
+  description: string | null;                 // e.g. "Indian singer (1929–2022)"
+  source: string | null;                      // Wikipedia page, or the Wikidata record
+  others: number;                             // other musicians with the same name (a person checks it is the same one)
+  checkedAt: string;
+  decision: 'Proceed' | 'Removed' | null;     // what a person decided after "passed away"
+  decidedBy: string | null;
+  decidedAt: string | null;
+}
+
 export interface ArtistProfile {
   id: string;                       // PF0001
   caseId: string | null;
@@ -629,4 +670,26 @@ export interface Ctx {
   userId: string; now: string; today: string; discovery?: 'live' | 'off';
   /** Search-API budget left (null or missing = no limit): complete artist searches left, and why nothing can run. */
   searchBudget?: { artists: number; exhausted: string | null } | null;
+}
+
+/** One direct message a person sent from Messages (the contact attempt it created is attemptId). */
+export interface OutreachMessage {
+  id: string;                       // MS00001
+  caseId: string;
+  kind: MessageKind;
+  sequenceId: string;               // id of the first message (invite or member); follow-ups share it
+  followUpNo: number;               // 0 = first message, 1-3 = follow-ups
+  templateId: string | null;
+  festivalId: string | null;
+  platform: MessagePlatform;
+  profileUrl: string;
+  handle: string;
+  text: string;
+  sentAt: string;
+  sentBy: string;
+  attemptId: string | null;
+  outcome: ReplyOutcome | null;     // the artist's answer, recorded on the latest message of the sequence
+  outcomeAt: string | null;
+  outcomeBy: string | null;
+  undoneAt?: string | null; undoneBy?: string | null; undoReason?: string | null;
 }

@@ -108,6 +108,40 @@ export function artistProfileUrl(raw: string, hint?: Platform): NormalizedUrl | 
   }
 }
 
+/** Platforms a person can add by hand, with an example of a profile link on each. */
+export const MANUAL_PLATFORMS: { platform: Platform; example: string }[] = [
+  { platform: 'Instagram', example: 'https://www.instagram.com/singer_shaan' },
+  { platform: 'Facebook', example: 'https://www.facebook.com/singer.shaan' },
+  { platform: 'X', example: 'https://x.com/singer_shaan' },
+  { platform: 'YouTube', example: 'https://www.youtube.com/@channelname' },
+  { platform: 'Spotify', example: 'https://open.spotify.com/artist/5cB4d4jPYjMT326sjihQ4m' },
+  { platform: 'Apple Music', example: 'https://music.apple.com/in/artist/shaan/260041408' },
+  { platform: 'JioSaavn', example: 'https://www.jiosaavn.com/artist/name/abc123' },
+  { platform: 'SoundCloud', example: 'https://soundcloud.com/name' },
+  { platform: 'Gaana', example: 'https://gaana.com/artist/name' },
+];
+/**
+ * Why a link a person pastes cannot be the artist's profile on that platform (or null when it can): only https links on
+ * the platform's own site, without a user name or password, pointing at a profile (not a post, video or song). Any other
+ * link (and so any malware link) is refused, on screen and again on the server.
+ */
+export function manualProfileProblem(platform: string, raw: string): { norm?: NormalizedUrl; problem: string | null } {
+  const s = String(raw ?? '').trim();
+  const site = SOCIAL.find(x => x.platform === platform);
+  const example = MANUAL_PLATFORMS.find(x => x.platform === platform)?.example;
+  if (!site || !example) return { problem: 'Pick the platform first.' };
+  if (!s) return { problem: `Paste the profile link, for example ${example}` };
+  if (s.length > 300 || /\s/.test(s)) return { problem: 'Paste one link only, without spaces.' };
+  if (!/^https:\/\//i.test(s)) return { problem: 'The link must start with https://' };
+  let u: URL;
+  try { u = new URL(s); } catch { return { problem: 'This is not a valid link.' }; }
+  if (u.username || u.password) return { problem: 'Links with a user name or password in them are not accepted.' };
+  if (!site.host.test(u.hostname.toLowerCase().replace(/\.$/, ''))) return { problem: `This is not ${/^[AEIOU]/.test(platform) ? 'an' : 'a'} ${platform} link: it must be on ${site.canonical}, for example ${example}` };
+  const n = artistProfileUrl(s, platform as Platform);
+  if (!n || n.platform !== platform) return { problem: `Paste the ${platform} profile itself, not a post, video, song or search page (for example ${example}).` };
+  return { norm: n, problem: null };
+}
+
 /** The artist name in a music-service address (gaana.com/artist/raju-singh → "raju singh"), or null. */
 export function slugName(normalizedUrl: string, platform: string): string | null {
   const seg = normalizedUrl.split('/').slice(1);

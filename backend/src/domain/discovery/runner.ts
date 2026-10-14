@@ -4,7 +4,8 @@
 import { ACTIVE_JOB_STATUSES, DISCOVERY_STEPS } from '../constants';
 import type { Model } from '../model';
 import type { Ctx, DiscoveryJob, JobProvider } from '../types';
-import { beginJob, cacheKeyOf, cacheLookup, failJob, finalizeJob, searchBlocked, type Collected, type QueryRun } from './pipeline';
+import { inVerification } from '../status';
+import { beginJob, cacheKeyOf, cacheLookup, failJob, finalizeJob, recordLife, searchBlocked, type Collected, type QueryRun } from './pipeline';
 import { ProviderError, pool, sleep, type CrawlResult, type DiscoveryProvider, type ProviderSet, type SearchContext } from './providers';
 import { artistQueries, buildFacts, collaboratorQueries, type SearchRequest } from './queries';
 import { normalizeProfileUrl } from './normalize';
@@ -27,6 +28,8 @@ export interface RunnerOptions {
   pace: (job: DiscoveryJob) => number;   // minimum ms per step (0 = as fast as the providers answer)
 }
 export const DEFAULT_RUNNER: RunnerOptions = { concurrency: 2, perProvider: 3, retries: 1, backoffMs: 400, cacheDays: 7, pace: () => 0 };
+
+const LIFE_RECHECK = 'life.recheckUnknown.v2';
 
 export class DiscoveryRunner {
   private running = new Set<string>();
@@ -52,6 +55,32 @@ export class DiscoveryRunner {
   /** Resolves when nothing is running or queued. */
   idle(): Promise<void> { return new Promise(r => { this.waiters.push(r); this.settle(); }); }
   stop() { this.stopped = true; this.settle(true); }
+
+  private checkingLives = false;
+
+  /**
+   * Artists searched before the "is the artist alive?" check existed (or when it could not answer): check each once, one
+   * at a time and gently (public records). An artist who passed away gets the question on their page. Returns how many.
+   */
+  async checkLivesOfStarted(): Promise<number> {
+    const set = this.providers();
+    if (!set.lifeCheck || this.checkingLives) return 0;
+    this.checkingLives = true;
+    let n = 0;
+    try {
+      // once after the check got better (v2: people of any description, then their occupation), "not found" is asked again
+      const again = this.host.read(m => !m.getMeta(LIFE_RECHECK));
+      const todo = this.host.read(m => m.all('cases').filter(c => c.kind === 'Artist' && inVerification(c) && (!c.life || (again && c.life.status === 'Unknown'))).map(c => ({ id: c.id, names: [c.canonicalName, ...c.aliases.slice(0, 1)] })));
+      let failed = 0;
+      for (const t of todo) {
+        if (this.stopped) break;
+        const life = await set.lifeCheck(t.names).catch(() => null);
+        if (life) { await this.host.mutate((m, ctx) => recordLife(m, ctx, t.id, null, life)); n++; } else failed++;
+      }
+      if (again && !failed && !this.stopped) await this.host.mutate((m, ctx) => m.setMeta(LIFE_RECHECK, ctx.now));
+    } finally { this.checkingLives = false; }
+    return n;
+  }
   get active() { return this.running.size; }
 
   /** Waits for this provider's next free slot (minIntervalMs apart). */
@@ -150,6 +179,14 @@ export class DiscoveryRunner {
       }
     };
     try {
+      // 0. is the artist alive? Asked first: for an artist who passed away the search waits for a person (no quota spent).
+      // A check that cannot be made (Wikidata down or busy) never stops the search.
+      const names = set.lifeCheck ? this.host.read(m => { const c = m.get('cases', m.canonical(job.caseId)); return c && c.kind === 'Artist' && c.life?.decision !== 'Proceed' ? [c.canonicalName, ...c.aliases.slice(0, 1)] : null; }) : null;
+      if (names && set.lifeCheck) {
+        const life = await set.lifeCheck(names).catch(() => null);
+        if (this.stopped) return;
+        if (life && await this.host.mutate((m, ctx) => recordLife(m, ctx, job.caseId, jobId, life))) return;
+      }
       const facts = this.host.read(m => buildFacts(m, m.canonical(job.caseId), job.focusTrackIds));
       // 1. queries
       const artistReqs = await paced(0, null, async () => artistQueries(facts, job.mode, !!job.bulkId));

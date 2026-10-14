@@ -10,7 +10,7 @@ export interface Meta {
   users: User[];
   me: User | null;
   today: string;
-  badges: { queue: number; reopened: number; identity: number; exceptions: number; notifications: number; discovery: number; searching: number; dedupe: number; needsReview: number; reopenedArtists: number; goongoonaloPending: number };
+  badges: { queue: number; reopened: number; identity: number; exceptions: number; notifications: number; discovery: number; searching: number; dedupe: number; needsReview: number; verifiedTodo: number; reopenedArtists: number; goongoonaloPending: number; messages: number };
   permissions: Record<string, boolean>;
   /** Why Find artist is off (no live search provider configured, or the usage limit reached), or null. */
   discoveryBlocked: string | null;

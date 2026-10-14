@@ -1,14 +1,15 @@
 // Discovery commands. Software searches; every identity, route and relationship decision below is made by a person
 // and recorded with who, when, why and the evidence. Nothing is deleted: rejected candidates stay, with the reason.
 import { ACTIVE_JOB_STATUSES } from '../constants';
-import { findConnections, nid, pathText, savePaths, syncProfileGraph, syncRouteGraph, upsertEdge } from '../graph';
+import { findConnections, inGraphScope, nid, pathText, savePaths, syncProfileGraph, syncRouteGraph, upsertEdge } from '../graph';
+import { TOP_ARTISTS } from '../views';
 import type { Model } from '../model';
 import {
   audit, closeTasks, computePriority, finishTask, getCase, openTasks, outreachBlocked, outreachTaskFor, requirePerm, rule, selectRoute, setField, setStage, syncNextAction, userName,
 } from '../ops';
 import type { ArtistProfile, Ctx, DiscoveryJob, Route } from '../types';
 import { clean } from '../util';
-import { normalizeProfileUrl } from './normalize';
+import { manualProfileProblem, normalizeProfileUrl } from './normalize';
 import { maybeFinishBulk, personalLimit, queueJob, regroup, searchBlocked, syncDiscoveryState } from './pipeline';
 import { clearReopen } from '../status';
 import { reviewCount } from './relevance';
@@ -94,7 +95,7 @@ function routeFromPath(m: Model, ctx: Ctx, pathId: string): Route {
   if (blocked && c.contactPreference !== 'Later') throw rule(`${blocked} No route is created.`);
   const contact = path.targetContactId ? m.get('contacts', path.targetContactId) : null;
   const profile = path.targetProfileId ? m.get('profiles', path.targetProfileId) : null;
-  const routes = m.byCase('routes', c.id);
+  const routes = m.byCase('routes', c.id).filter(r => r.state !== 'Deleted');   // a deleted route may be created again on purpose
   if (contact && routes.some(r => r.contactId === contact.id)) throw rule(`A route through ${contact.personName} already exists for this case.`);
   if (profile && routes.some(r => r.sourceUrl && normalizeProfileUrl(r.sourceUrl)?.normalized === profile.normalizedUrl)) throw rule('A route to this profile already exists.');
   const person = path.steps.slice(1).find(s => s.kind === 'Artist' || s.kind === 'Person' || s.kind === 'Collaborator');
@@ -132,7 +133,7 @@ export const discoveryCommands: Record<string, Command> = {
       if (!c.ownerId) setField(m, ctx, m.get('cases', c.id)!, 'ownerId', ctx.userId, 'Owner set to the person who started discovery');
     }
     audit(m, ctx, { caseId: c.id, entity: 'DiscoveryJob', entityId: job.id, action: mode === 'refresh' ? 'Refresh search started' : 'Discovery started', to: `v${job.version}`, reason: mode === 'refresh' ? 'Search again; earlier versions are kept' : 'Find artist: software searches, a person verifies', next: 'Review candidates when the search finishes' });
-    return { message: `${mode === 'refresh' ? 'Refreshing' : 'Finding'} ${c.canonicalName}: discovery ${job.id} (v${job.version}) is running in the background.`, caseId: c.id, id: job.id };
+    return { message: `${mode === 'refresh' ? 'Refreshing' : 'Finding'} ${c.canonicalName}: discovery ${job.id} (v${job.version}) is running in the background.${mode === 'full' ? ' The artist is now in Verified Artists → In progress.' : ''}`, caseId: c.id, id: job.id };
   },
   retryDiscovery(m, ctx, p) {
     const j = m.get('discoveryJobs', p.jobId);
@@ -292,6 +293,7 @@ export const discoveryCommands: Record<string, Command> = {
   // ---------------------------------------------------------------- connections and routes
   findConnection(m, ctx, p) {
     const c = getCase(m, p.caseId);
+    if (!inGraphScope(m, c.id)) throw rule(`Connections are kept for the top ${TOP_ARTISTS} artists (most songs) only. ${c.canonicalName} is not one of them.`);
     const found = findConnections(m, c.id, ctx.today);
     const saved = savePaths(m, ctx, c.id, found);
     const usable = saved.all.filter(x => x.status === 'SUGGESTED' && !x.note);
@@ -335,6 +337,45 @@ export const discoveryCommands: Record<string, Command> = {
     syncRouteGraph(m, ctx, r.id);
     computePriority(m, m.get('cases', c.id)!, ctx.today);
     return { message: `Route ${r.id} verified. ${c.canonicalName} is Route Ready: ${task.step}.`, caseId: c.id, id: r.id };
+  },
+  /**
+   * A person adds the artist's profile themselves (search missed it). Only a real profile link of the chosen platform is
+   * accepted (manualProfileProblem); it is saved as verified, by that person. It may replace a wrong verified profile.
+   */
+  addProfileByHand(m, ctx, p) {
+    const c = getCase(m, req(p.caseId, 'The artist'));
+    const { norm, problem } = manualProfileProblem(clean(p.platform), clean(p.url));
+    if (problem || !norm) throw rule(problem ?? 'This link is not accepted.');
+    const note = clean(p.note);
+    const why = `Added by hand by ${userName(m, ctx.userId)}${note ? `: ${note}` : ''}`;
+    const old = p.replaceProfileId ? getProfile(m, p.replaceProfileId) : null;
+    if (old && (old.caseId !== c.id || old.platform !== norm.platform || old.verificationStatus !== 'VERIFIED')) throw rule(`Only a verified ${norm.platform} profile of this artist can be replaced.`);
+    let pr = m.profileAt(c.id, null, norm.normalized);
+    if (pr?.verificationStatus === 'VERIFIED') throw rule(`${label(pr)} is already verified for this artist.`);
+    if (pr) {
+      pr = m.update('profiles', pr.id, { verificationStatus: 'UNREVIEWED', changeOfProfileId: null, rejectionReason: null, source: [...new Set([...pr.source.split(' · '), 'Added by hand'])].filter(Boolean).join(' · '), matched: [why, ...pr.matched.filter(x => x !== why)] });
+    } else {
+      const handle = norm.username;
+      pr = m.insert('profiles', {
+        id: m.nextId('PF', 4), caseId: c.id, collaboratorId: null, platform: norm.platform, url: norm.url, normalizedUrl: norm.normalized, displayName: handle ? `@${handle}` : c.canonicalName, username: handle,
+        title: '', description: '', location: null, language: null, links: [], tracks: [], followers: null, source: 'Added by hand', foundVia: [], discoveryStatus: 'FOUND', verificationStatus: 'UNREVIEWED',
+        evidenceScore: 100, strength: 'STRONG', matched: [why], conflicts: [], matchedSongs: [], otherCaseId: null, groupKey: null, groupLabel: null, changeOfProfileId: null, scoreAtReview: null,
+        firstJobId: 'MANUAL', lastJobId: 'MANUAL', lastVersion: 0, discoveredAt: ctx.now, lastCheckedAt: ctx.now, reviewedAt: null, reviewedBy: null, reviewNote: null, verifiedAt: null, verifiedBy: null, rejectionReason: null, demo: false,
+      });
+    }
+    const added = pr;
+    audit(m, ctx, { caseId: c.id, entity: 'ArtistProfile', entityId: added.id, action: 'Profile added by hand', to: `${label(added)} · ${added.url}`, reason: note || 'Search did not find it' });
+    verifyOne(m, ctx, added, why);
+    if (old) {
+      m.update('profiles', old.id, { verificationStatus: 'REPLACED', reviewNote: `Replaced by ${label(added)} on ${ctx.today}` });
+      const newVp = m.byCase('verifiedProfiles', c.id).find(v => v.profileId === added.id && v.verificationStatus === 'VERIFIED');
+      for (const v of m.byCase('verifiedProfiles', c.id)) if (v.profileId === old.id && v.verificationStatus === 'VERIFIED') m.update('verifiedProfiles', v.id, { verificationStatus: 'REPLACED', replacedBy: newVp?.id ?? null });
+      syncProfileGraph(m, ctx, m.get('profiles', old.id)!);
+      audit(m, ctx, { caseId: c.id, entity: 'ArtistProfile', entityId: added.id, action: 'Profile changed', from: old.url, to: added.url, reason: note || 'The verified profile was wrong', result: `${label(old)} kept in history as replaced` });
+    }
+    afterReview(m, ctx, c.id);
+    const twin = !old && m.byCase('profiles', c.id).find(x => x.id !== added.id && x.platform === norm.platform && x.verificationStatus === 'VERIFIED');
+    return { message: `${label(added)} added and verified.${old ? ` ${label(old)} is kept as replaced.` : ''}${twin ? ` Note: ${label(twin)} is also verified.` : ''}`, caseId: c.id, id: added.id };
   },
   setDiscoverySettings(m, ctx, p) {
     requirePerm(m, ctx, 'discoverySettings');

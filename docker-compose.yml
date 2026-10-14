@@ -15,6 +15,11 @@ services:
       PORT: "4000"
     expose:
       - "4000"
+    # Fast public DNS for the database host. Docker's default servers can be blocked (e.g. 1.1.1.1 on some networks):
+    # each lookup then stalls ~4 s and Prisma's 5 s connect timeout fails every migration (P1001).
+    dns:
+      - ${DNS_PRIMARY:-8.8.8.8}
+      - ${DNS_SECONDARY:-8.8.4.4}
     restart: unless-stopped
 
   frontend:

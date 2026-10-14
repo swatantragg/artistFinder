@@ -4,17 +4,19 @@ import { AlertTriangle, Ban, GitMerge, RotateCcw, SearchX, Trash2 } from 'lucide
 import { useState, type ReactNode } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import type { LifecycleStage } from '@domain/constants';
+import type { DirectoryFacts, LifeCheck } from '@domain/types';
+import { LifeNotice } from '../../components/LifeNotice';
 import { useActions } from '../../components/actions';
 import { PeopleGraph } from '../../components/discovery/PeopleGraph';
 import { PossibleConnections, type PathV } from '../../components/discovery/Connections';
 import { DiscoveryPanel, useDiscovery } from '../../components/discovery/DiscoveryPanel';
 import { DiscoveryChip } from '../../components/discovery/bits';
 import { GoongoonaloBadge, IdentityBadge, KindBadge } from '../../components/status';
-import { Avatar, Button, Empty, ErrorBox, Menu, Notice, Skeleton, Tabs } from '../../components/ui';
+import { Avatar, Badge, Button, Empty, ErrorBox, Menu, Notice, Skeleton, Tabs } from '../../components/ui';
 import { useApp, useQuery } from '../../lib/app';
 import { fmtAgo, fmtDate, fmtDateTime, num } from '../../lib/format';
-import { CollaboratorsTab, ResearchTab, RoutesTab, SongsTab } from './tabs-identity';
-import { ActivationTab, AttemptsTab, ClaimsTab, TimelineTab } from './tabs-work';
+import { CollaboratorsTab, ResearchTab, SongsTab } from './tabs-identity';
+import { ActivationTab, ClaimsTab, TimelineTab } from './tabs-work';
 import { OverviewTab, ProfilesTab } from './tabs-v2';
 
 export interface CaseV2 {
@@ -33,7 +35,7 @@ export interface CaseDetail {
     lifecycleStage: LifecycleStage; previousStage: string | null; stageReason: string; stageSince: string; workReason: string; contactPreference: string; contactPreferenceUntil: string | null; ownerId: string | null;
     nextAction: string | null; nextActionDate: string | null; firstSeen: string; lastSeen: string; lastEvidenceChange: string | null; lastEvidenceNote: string | null; claimStatus: string; activationStatus: string;
     priority: string; priorityScore: number; mergedIntoId: string | null; closedReason: string | null; waiting: { blocker: string; routesTested: string[]; coverage: string; lastReview: string; futureTrigger: string; nextReviewDate: string } | null;
-    arm: unknown; firstSeenBatchId: string | null;
+    arm: unknown; firstSeenBatchId: string | null; life?: LifeCheck | null; directory?: DirectoryFacts | null;
   };
   ownerName: string; artistId: string | null; songs: number;
   counts: Record<'songs' | 'collaborators' | 'routes' | 'research' | 'attempts' | 'claims' | 'activation' | 'tasks' | 'timeline', number>;
@@ -55,7 +57,7 @@ export default function Dossier() {
   const { data: d, error } = useQuery<CaseDetail | null>('caseDetail', { id });
   const { open } = useActions();
   const navigate = useNavigate();
-  const { meta } = useApp();
+  const { meta, run: runApp } = useApp();
 
   if (error) return <ErrorBox text={error} />;
   if (d === null) return <Empty title="Artist not found." text={`No artist with ID ${id}.`} action={<Button onClick={() => navigate('/artists')}>Back to Artists</Button>} />;
@@ -77,8 +79,9 @@ export default function Dossier() {
   ];
   const menu = [...d.actions.filter(a => a.id !== primary?.id), ...extra.map(x => ({ ...x, primary: false, disabled: undefined as string | undefined }))];
   const relevant = {
-    routes: d.counts.routes + d.counts.attempts > 0 || v.verified || !['Unresearched', 'Researching', 'Identity Review'].includes(c.lifecycleStage),
-    claims: v.verified || c.claimStatus !== 'Not Invited' || d.counts.claims > 0 || !['Unresearched', 'Researching', 'Identity Review', 'Waiting for Evidence', 'Route Ready'].includes(c.lifecycleStage),
+    // Claims & routes: the Goongoonalo question, the route (how we reach the artist), the first message and, for artists not
+    // on Goongoonalo, the claim. One tab for all of it (routes used to be a separate tab).
+    claims: v.verified || c.claimStatus !== 'Not Invited' || d.counts.claims > 0 || d.counts.routes + d.counts.attempts > 0 || !['Unresearched', 'Researching', 'Identity Review', 'Waiting for Evidence', 'Route Ready'].includes(c.lifecycleStage),
     activation: c.claimStatus === 'Completed' || d.counts.activation > 0,
   };
   const tabs = [
@@ -88,17 +91,18 @@ export default function Dossier() {
     { id: 'collaborators', label: 'Collaborators', count: d.counts.collaborators || null },
     { id: 'evidence', label: 'Evidence', count: d.discovery.open || null },
     { id: 'graph', label: 'Connection Graph', count: d.discovery.paths || null },
-    ...(relevant.routes ? [{ id: 'routes', label: 'Routes', count: d.counts.routes || null }] : []),
-    ...(relevant.claims ? [{ id: 'claims', label: 'Claims', count: d.counts.claims || null }] : []),
+    ...(relevant.claims ? [{ id: 'claims', label: 'Claims & routes', count: d.counts.claims + d.counts.routes || null }] : []),
     ...(relevant.activation ? [{ id: 'activation', label: 'Activation', count: d.counts.activation || null }] : []),
     { id: 'timeline', label: 'Timeline', count: null },
   ];
   const asked = sp.get('tab') ?? 'overview';
-  const tab = tabs.some(t => t.id === asked) ? asked : asked === 'discovery' ? 'evidence' : 'overview';
+  const tab = tabs.some(t => t.id === asked) ? asked : asked === 'discovery' ? 'evidence' : asked === 'routes' && relevant.claims ? 'claims' : 'overview';
 
   return (
     <>
-      <Link to="/artists" className="mb-2 inline-flex text-sm text-muted hover:text-ink">← Artists</Link>
+      {/* artists whose search started are followed in Verified Artists (V2.7.2) */}
+      {v.artistStatus === 'NEW' || v.rejected ? <Link to="/artists" className="mb-2 inline-flex text-sm text-muted hover:text-ink">← Artists</Link>
+        : <Link to={v.verified ? '/verified' : '/verified?view=progress'} className="mb-2 inline-flex text-sm text-muted hover:text-ink">← Verified Artists{v.verified ? '' : ' · In progress'}</Link>}
       <section className="rounded-lg border border-line bg-surface shadow-[var(--shadow)]">
         <div className="flex flex-wrap items-start gap-3 p-3 sm:gap-4 sm:p-4">
           <Avatar name={c.canonicalName} size={56} className="max-sm:hidden" />
@@ -106,6 +110,15 @@ export default function Dossier() {
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-2xl font-semibold tracking-[-0.01em] text-ink">{c.canonicalName}</h1>
               <KindBadge kind={v.kind} />
+              {c.directory?.core && <Badge tone="gold" title="Core member (artist directory)">Core member</Badge>}
+              {(v.kind === 'Artist' || v.kind === 'Label') && (
+                <Menu label="Artist or label" align="left"
+                  trigger={<button type="button" className="rounded px-1.5 py-0.5 text-xs text-muted underline decoration-line-strong hover:text-ink" title="Artist or label">{v.kind === 'Label' ? 'Label' : 'Artist'} · change</button>}
+                  items={[
+                    { label: 'This is an artist (a person or group)', disabled: v.kind === 'Artist' ? 'Already an artist' : false, onClick: () => { void runApp('setKind', { caseId: c.id, kind: 'Artist' }); } },
+                    { label: 'This is a label or company', disabled: v.kind === 'Label' ? 'Already a label' : false, onClick: () => { void runApp('setKind', { caseId: c.id, kind: 'Label' }); } },
+                  ]} />
+              )}
             </div>
             <p className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted">
               <span>Artist ID <span className="mono text-ink">{c.id}</span></span>
@@ -149,6 +162,7 @@ export default function Dossier() {
       </section>
 
       <div className="mt-3 space-y-2">
+        <LifeNotice caseId={c.id} name={c.canonicalName} life={c.life} searched={d.discovery.open > 0 || d.discovery.verified.length > 0} />
         {v.reopen && (
           <Notice tone="violet" icon={<RotateCcw size={18} />} title={`Reopened ${fmtAgo(v.reopen.at)}: something changed since the last review`}
             action={<span className="flex flex-wrap gap-1.5"><Button size="sm" variant="primary" onClick={() => open('markReopenReviewed', ctx)}>Mark reviewed</Button>{d.discovery.lastSearchAt && <Button size="sm" onClick={() => open('refreshSearch', ctx)}>Refresh search</Button>}</span>}>
@@ -172,8 +186,7 @@ export default function Dossier() {
           {tab === 'collaborators' && <CollaboratorsTab id={c.id} />}
           {tab === 'evidence' && <EvidenceTab d={d} />}
           {tab === 'graph' && <GraphTab caseId={c.id} />}
-          {tab === 'routes' && <><RoutesTab d={d} /><div className="mt-5"><p className="mb-2 text-sm font-semibold text-ink">Contact attempts</p><AttemptsTab d={d} /></div></>}
-          {tab === 'claims' && <ClaimsTab d={d} />}
+          {tab === 'claims' && <ClaimsTab d={d} onTab={(t: string) => setSp({ tab: t })} />}
           {tab === 'activation' && <ActivationTab d={d} />}
           {tab === 'timeline' && <TimelineTab id={c.id} />}
         </div>

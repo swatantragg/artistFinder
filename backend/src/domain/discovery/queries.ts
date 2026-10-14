@@ -126,7 +126,8 @@ export function artistQueries(f: CaseFacts, mode: DiscoveryMode, bulk = false): 
     for (const s of withIsrc.filter(x => x.isNew).slice(0, 3)) add(q(s.isrc), 'isrc', 1, { isrc: s.isrc });
   } else {
     add(name, 'name', 1);
-    SITE_QUERIES.slice(0, 3).forEach((p, i) => add(`${name} site:${p.site}`, 'site', 2 + i, { platform: p.platform }));
+    // Instagram with the role, like a person would search (“Shaan singer instagram”): common names have many namesakes there.
+    SITE_QUERIES.slice(0, 3).forEach((p, i) => add(`${name}${p.platform === 'Instagram' ? ` ${role}` : ''} site:${p.site}`, 'site', 2 + i, { platform: p.platform }));
     add(`${name} ${role}`, 'role', 5);
     add(`${name} official`, 'platform', 6);
     SITE_QUERIES.slice(3).forEach((p, i) => add(`${name} site:${p.site}`, 'site', 7 + i, { platform: p.platform }));

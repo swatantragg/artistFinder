@@ -1,11 +1,13 @@
 // Reports, Audit Log and Settings.
-import { Check, Database, KeyRound, LogOut, Moon, Power, ShieldCheck, Sun, Monitor, Trash2, UserPlus } from 'lucide-react';
+import { Check, Database, KeyRound, LogOut, Power, ShieldCheck, Trash2, UserPlus } from 'lucide-react';
 import QRCode from 'qrcode';
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { PEOPLE_ROLES } from '@domain/constants';
 import { Timeline, type AuditRow } from '../components/case-bits';
-import { Avatar, Badge, Bars, Button, Card, DataTable, Empty, Field, Modal, PageHeader, Pagination, Segmented, Skeleton, Stat, cx } from '../components/ui';
+import { Avatar, Badge, Bars, Button, Card, DataTable, Empty, Field, Modal, PageHeader, Pagination, Segmented, Select, Skeleton, Stat, cx } from '../components/ui';
+import { TEXT_SIZES, setTextSize, usePrefs } from '../lib/prefs';
+import { ThemeSwitch } from '../components/Layout';
 import { useApp, useDebounced, useQuery } from '../lib/app';
 import type { Queries } from '@domain/queries';
 import { fmtDateTime, num } from '../lib/format';
@@ -43,7 +45,7 @@ export function ReportsPage() {
         <Stat label="Route success" value={`${data.routeSuccess.confirmed}/${data.routeSuccess.used}`} sub="cases confirmed via a used route" />
       </div>
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
-        <Card title="Cases by lifecycle stage" subtitle="Click a stage to open those cases"><Bars data={data.stageDistribution} onPick={l => navigate(`/artists?stage=${encodeURIComponent(l)}&kind=all`)} /></Card>
+        <Card title="Cases by lifecycle stage" subtitle="Click a stage to open those cases"><Bars data={data.stageDistribution} onPick={l => navigate(`/artists?scope=all&stage=${encodeURIComponent(l)}&kind=all`)} /></Card>
         <div className="space-y-4">
           <Card title="Claim funnel"><Bars data={data.claimFunnel} tone="violet" /></Card>
           <Card title="Activation funnel"><Bars data={data.activationFunnel} tone="green" /></Card>
@@ -79,8 +81,8 @@ export function AuditPage() {
       <Card pad={false}>
         <div className="grid gap-2 border-b border-line p-3 sm:grid-cols-2 lg:grid-cols-5">
           <input className="field" placeholder="Search artist, case ID or text" value={f.q} onChange={e => set({ q: e.target.value })} />
-          <select className="field" value={f.userId} onChange={e => set({ userId: e.target.value })}><option value="">Anyone</option>{meta?.users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}</select>
-          <select className="field" value={f.action} onChange={e => set({ action: e.target.value })}><option value="">Any action</option>{data?.actions.map(a => <option key={a}>{a}</option>)}</select>
+          <Select ariaLabel="Person" value={f.userId} onChange={v => set({ userId: v })} options={[{ value: '', label: 'Anyone' }, ...(meta?.users ?? []).map(u => ({ value: u.id, label: u.name }))]} />
+          <Select ariaLabel="Action" value={f.action} onChange={v => set({ action: v })} options={[{ value: '', label: 'Any action' }, ...(data?.actions ?? []).map(a => ({ value: a, label: a }))]} />
           <input type="date" className="field" value={f.from} onChange={e => set({ from: e.target.value })} aria-label="From date" />
           <input type="date" className="field" value={f.to} onChange={e => set({ to: e.target.value })} aria-label="To date" />
         </div>
@@ -105,18 +107,12 @@ export function AuditPage() {
 }
 
 // ------------------------------------------------------------------ Settings
-const THEME_KEY = 'gamplify.theme';
-export function applyStoredTheme() { try { const t = localStorage.getItem(THEME_KEY); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch { /* default */ } }
 export function SettingsPage() {
   const app = useApp();
   const [confirm, setConfirm] = useState(false);
   const [typed, setTyped] = useState('');
   const [busy, setBusy] = useState(false);
-  const [theme, setTheme] = useState<'system' | 'light' | 'dark'>(() => { try { return (localStorage.getItem(THEME_KEY) as 'light' | 'dark') || 'system'; } catch { return 'system'; } });
-  useEffect(() => {
-    if (theme === 'system') delete document.documentElement.dataset.theme; else document.documentElement.dataset.theme = theme;
-    try { if (theme === 'system') localStorage.removeItem(THEME_KEY); else localStorage.setItem(THEME_KEY, theme); } catch { /* per-browser */ }
-  }, [theme]);
+  const { textSize } = usePrefs();
   const navigate = useNavigate();
   const owner = app.can('resetWorkspace');
   const reset = async () => {
@@ -147,9 +143,20 @@ export function SettingsPage() {
             <p className="flex items-center gap-2 text-sm text-ink"><Database size={15} />PostgreSQL through the API server (system of record).</p>
             <p className="mt-1 text-xs text-muted">Artists, songs and credits come only from the export files uploaded on the Imports page; every row is kept with its original values.</p>
           </Card>
-          <Card title="Appearance">
-            <Segmented options={[{ id: 'system', label: 'System' }, { id: 'light', label: 'Light' }, { id: 'dark', label: 'Dark' }]} value={theme} onChange={setTheme} />
-            <span className="ml-2 inline-flex gap-1 align-middle text-faint">{theme === 'light' ? <Sun size={14} /> : theme === 'dark' ? <Moon size={14} /> : <Monitor size={14} />}</span>
+          <Card title="Display" subtitle="For this browser only. Text also grows a little on bigger screens.">
+            <p className="mb-2 text-sm font-medium text-ink-2">Theme</p>
+            <ThemeSwitch />
+            <p className="mb-2 mt-5 text-sm font-medium text-ink-2">Text size</p>
+            <div role="radiogroup" aria-label="Text size" className="grid grid-cols-5 gap-2">
+              {TEXT_SIZES.map(t => (
+                <button key={t.id} type="button" role="radio" aria-checked={textSize === t.id} onClick={() => setTextSize(t.id)}
+                  className={cx('flex flex-col items-center justify-end gap-1 rounded-xl border px-1 py-2.5', textSize === t.id ? 'border-accent bg-accent-soft text-ink' : 'border-line-strong text-ink-2 hover:bg-hover')}>
+                  <span className="font-semibold leading-none" style={{ fontSize: `${t.scale * 1.15}rem` }}>A</span>
+                  <span className="text-2xs">{t.label}</span>
+                </button>
+              ))}
+            </div>
+            <p className="mt-3 text-sm text-muted">Example: this is how text in lists and pop-ups will look.</p>
           </Card>
           {owner && (
             <Card title="Workspace" subtitle="Deleting cannot be undone: every artist, import, search result and history entry is removed. People and their accounts stay.">
@@ -197,7 +204,7 @@ function PeopleCard() {
     catch (e) { app.toast((e as Error).message, 'error'); }
     finally { setBusy(null); }
   };
-  const roleOptions = PEOPLE_ROLES.map(r => <option key={r} value={r}>{r}</option>);
+  const roleOptions = PEOPLE_ROLES.map(r => ({ value: r, label: r }));
   return (
     <Card title="People and roles" subtitle={manage ? (iAmOwner ? 'Add people, approve sign-ups, change roles, set passwords and switch people off.' : 'Add people, approve sign-ups, make Users Admins and switch Users off.') : 'Everyone on the team. An Admin adds people and sets roles.'}
       actions={manage ? <Button size="sm" variant="primary" icon={<UserPlus size={15} />} onClick={() => setAdding(true)}>Add person</Button> : undefined}>
@@ -230,7 +237,7 @@ function PeopleCard() {
               <span className="flex flex-wrap items-center gap-2">
                 {me ? <Badge tone="green">You · {u.role}</Badge> : canRole && !off ? (
                   <span className="w-[130px]">
-                    <select className="field" aria-label={`Role of ${u.name}`} value={u.role} onChange={e => { void app.run('setUserRole', { userId: u.id, role: e.target.value }); }}>{roleOptions}</select>
+                    <Select size="sm" ariaLabel={`Role of ${u.name}`} value={u.role} onChange={v => { void app.run('setUserRole', { userId: u.id, role: v }); }} options={roleOptions} />
                   </span>
                 ) : <Badge>{u.role}</Badge>}
                 {canPw && !off && <Button size="sm" icon={<KeyRound size={14} />} onClick={() => setPwFor(u)}>Set password</Button>}
@@ -266,7 +273,7 @@ function SignupRequestRow({ r, busy, act }: { r: SignupRequest; busy: string | n
         <span className="block truncate text-xs text-muted">{r.email} · asked {fmtDateTime(r.requestedAt)}</span>
       </span>
       <span className="flex flex-wrap items-center gap-2">
-        <span className="w-[110px]"><select className="field" aria-label={`Role for ${r.name}`} value={role} onChange={e => setRole(e.target.value as 'Admin' | 'User')}>{PEOPLE_ROLES.map(x => <option key={x} value={x}>{x}</option>)}</select></span>
+        <span className="w-[110px]"><Select size="sm" ariaLabel={`Role for ${r.name}`} value={role} onChange={v => setRole(v as 'Admin' | 'User')} options={PEOPLE_ROLES.map(x => ({ value: x, label: x }))} /></span>
         <Button size="sm" variant="primary" icon={<Check size={14} />} loading={busy === `ok:${r.userId}`} onClick={() => void act(`ok:${r.userId}`, () => app.backend.approve(r.userId, role))}>Approve</Button>
         <Button size="sm" variant="danger" loading={busy === `no:${r.userId}`} onClick={() => { if (confirm(`Decline the sign-up of ${r.name} (${r.email})?`)) void act(`no:${r.userId}`, () => app.backend.decline(r.userId)); }}>Decline</Button>
       </span>
@@ -295,7 +302,7 @@ function AddPersonModal({ onClose }: { onClose: () => void }) {
         <Field label="Name" required><input className="field" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} autoFocus maxLength={80} /></Field>
         <Field label="Email" required><input className="field" type="email" value={f.email} onChange={e => setF({ ...f, email: e.target.value })} autoComplete="off" /></Field>
         <Field label="First password" required help="At least 12 characters. Share it with them."><input className="field" type="text" value={f.password} onChange={e => setF({ ...f, password: e.target.value })} autoComplete="off" /></Field>
-        <Field label="Role" required><select className="field" value={f.role} onChange={e => setF({ ...f, role: e.target.value as 'Admin' | 'User' })}>{PEOPLE_ROLES.map(r => <option key={r} value={r}>{r}</option>)}</select></Field>
+        <Field label="Role" required><Select ariaLabel="Role" value={f.role} onChange={v => setF({ ...f, role: v as 'Admin' | 'User' })} options={PEOPLE_ROLES.map(r => ({ value: r, label: r, hint: ROLE_TEXT[r] }))} /></Field>
         <p className="text-xs text-muted sm:col-span-2"><b className="text-ink-2">{f.role}:</b> {ROLE_TEXT[f.role]}</p>
         {error && <p role="alert" className="text-sm text-[var(--t-red)] sm:col-span-2">{error}</p>}
         <button type="submit" hidden />

@@ -2,13 +2,14 @@
 // Screens only call open(actionId, context); the modal, validation, confirmation and error handling live here.
 import { AlertTriangle, Search } from 'lucide-react';
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
-  ATTEMPT_RESULTS, CHANNELS, CHECKLIST_STEPS, CONTACT_PREFERENCES, FEATURES, GOONGOONALO_INFO, GOONGOONALO_STATUSES, LIFECYCLE_STAGES, PRIORITIES, TASK_KINDS,
+  ATTEMPT_RESULTS, CHANNELS, CHECKLIST_STEPS, CONTACT_PREFERENCES, FEATURES, GOONGOONALO_INFO, GOONGOONALO_STATUSES, LIFECYCLE_STAGES,
+  MESSAGE_PLATFORMS, PRIORITIES, REPLY_OUTCOMES, TASK_KINDS,
 } from '@domain/constants';
 import { useApp, type Meta } from '../lib/app';
 import { addDays, todayLocal } from '../lib/format';
-import { Button, ErrorBox, Field, Modal, Notice, SkeletonRows, cx } from './ui';
+import { Button, ErrorBox, Field, Modal, Notice, Select, SkeletonRows, cx } from './ui';
 
 // ------------------------------------------------------------------ types
 export interface ActionCtx { caseId?: string; taskId?: string; task?: TaskLite; routeId?: string; contactId?: string; rowId?: string; conflictId?: string; decisionId?: string; preset?: Record<string, unknown> }
@@ -49,6 +50,15 @@ const firstOf = (env: Env, role: string) => env.meta.users.find(u => u.role === 
 const routeOptions = (env: Env): Opt[] => (env.d?.routesForForms ?? []).map((r: any) => ({ value: r.id, label: `${r.id} · ${r.chain.slice(1).map((x: any) => x.label).join(' → ')} (${r.state})` }));
 const caseName = (env: Env) => env.d?.case?.canonicalName ?? 'this artist';
 
+const REPLY_HINT: Record<string, string> = {
+  Interested: 'Not on Goongoonalo yet: the artist moves to Contact Confirmed and the claim invitation is next.',
+  Replied: 'A real conversation started. Follow-ups stop.',
+  'Not interested': 'Opted out: no more messages. Shown in Verified Artists.',
+  'Do not disturb': 'Opted out for good: nobody can contact the artist again. Shown in Verified Artists.',
+  'Could not deliver': 'The message did not arrive (chat closed, account gone). Try another verified profile.',
+  'Yes to greetings': 'The artist will get festival greetings.',
+  'Stop greetings': 'No more festival greetings (the artist replied STOP).',
+};
 const RESULT_HINT: Record<string, string> = {
   'No Response': 'Stays “Contact Attempted”. A follow-up task is created automatically.',
   'Introduction Requested': 'Moves to “Introduction Pending”. Reaching an introducer is not reaching the artist.',
@@ -232,10 +242,16 @@ export const ACTIONS: Record<string, ActionDef> = {
   verifyRoute: { title: 'Mark route verified', command: 'updateRoute', submit: 'Mark verified', fields: [{ name: 'reason', label: 'How it was verified', type: 'text', required: true }], params: (v, env) => ({ routeId: env.ctx.routeId, state: 'Verified', reason: v.reason }) },
   rejectRoute: { title: 'Reject route', command: 'updateRoute', submit: 'Reject route', danger: true, intro: () => 'The route is kept with its reason so nobody tries it again.', fields: [{ name: 'reason', label: 'Reason', type: 'text', required: true, placeholder: 'e.g. Wrong person: actor with the same name' }], params: (v, env) => ({ routeId: env.ctx.routeId, state: 'Rejected', reason: v.reason }) },
   exhaustRoute: { title: 'Mark route exhausted', command: 'updateRoute', submit: 'Mark exhausted', fields: [{ name: 'reason', label: 'Reason', type: 'text', required: true, placeholder: 'e.g. No reply after two follow-ups' }], params: (v, env) => ({ routeId: env.ctx.routeId, state: 'Exhausted', reason: v.reason }) },
+  deleteRoute: {
+    title: 'Delete route', command: 'deleteRoute', submit: 'Delete route', danger: true,
+    intro: () => 'The route disappears from Claims & routes and the graph. The timeline keeps a note of it. To message the artist yourself, choose one of their verified profiles as the route.',
+    fields: [{ name: 'reason', label: 'Why (optional)', type: 'text', placeholder: 'e.g. Test route, or wrong person' }],
+    params: (v, env) => ({ routeId: env.ctx.routeId, reason: v.reason }),
+  },
   recordContact: {
     title: env => `Record contact: ${caseName(env)}`, command: 'recordContactAttempt', submit: 'Save contact attempt',
     fields: env => [
-      { name: 'routeId', label: 'Route used', type: 'select', options: [{ value: '', label: 'No route (direct)' }, ...routeOptions(env)], initial: env.ctx.routeId ?? (env.d?.routesForForms ?? []).find((r: any) => r.state === 'Selected')?.id ?? (env.d?.routesForForms ?? [])[0]?.id ?? '' },
+      { name: 'routeId', label: 'Route used', type: 'select', help: 'A route is a go-between (a manager, label or collaborator). Pick “Direct” when you messaged the artist yourself.', options: [{ value: '', label: 'Direct, no route (the artist’s own profile, email or phone)' }, ...routeOptions(env)], initial: env.ctx.routeId ?? (env.d?.routesForForms ?? []).find((r: any) => r.state === 'Selected')?.id ?? (env.d?.routesForForms ?? [])[0]?.id ?? '' },
       { name: 'channel', label: 'Channel', type: 'select', required: true, options: CHANNELS, initial: env.ctx.task?.channel ?? defaultChannel(env), half: true },
       { name: 'recipient', label: 'Recipient', type: 'text', required: true, initial: env.ctx.task?.recipient ?? defaultRecipient(env), half: true },
       { name: 'message', label: 'Message / action', type: 'text', placeholder: 'What was sent or said' },
@@ -264,6 +280,39 @@ export const ACTIONS: Record<string, ActionDef> = {
     ],
   },
   verifyContact: { title: 'Verify contact', command: 'verifyContact', submit: 'Mark verified', needsCase: false, intro: () => 'Waiting cases credited with this person can reopen with a new lead.', fields: [{ name: 'evidence', label: 'How the identity was corroborated', type: 'text', required: true }], params: (v, env) => ({ contactId: env.ctx.contactId, ...v }) },
+
+  // ---- messages
+  recordReply: {
+    title: env => `What did ${caseName(env)} answer?`, command: 'recordReply', submit: 'Save answer',
+    intro: () => 'Any answer stops the follow-ups. “Not interested” and “Do not disturb” opt the artist out: nobody can message them again.',
+    fields: [
+      { name: 'outcome', label: 'Answer', type: 'select', required: true, options: REPLY_OUTCOMES, initial: 'Interested', help: v => REPLY_HINT[v.outcome] },
+      { name: 'note', label: 'Note (optional)', type: 'text', placeholder: 'e.g. Asked for the link on WhatsApp' },
+    ],
+    params: (v, env) => ({ caseId: env.ctx.caseId, outcome: v.outcome, note: v.note }),
+    confirm: v => v.outcome === 'Do not disturb' ? 'Opt this artist out for good? Nobody can message them again, including after future imports.' : null,
+  },
+  deleteTemplate: { title: 'Delete template', command: 'deleteTemplate', submit: 'Delete', danger: true, needsCase: false, intro: () => 'Messages already sent keep their text.', params: (_v, env) => ({ id: (env.ctx.preset?.values as Values | undefined)?.id }) },
+  saveFestival: {
+    title: env => (env.ctx.preset?.values as Values | undefined)?.id ? 'Edit festival' : 'Add festival', command: 'saveFestival', submit: 'Save festival', needsCase: false,
+    intro: () => 'Festivals that follow the moon move every year: check the date before greetings go out.',
+    fields: [
+      { name: 'name', label: 'Festival', type: 'text', required: true, half: true },
+      { name: 'date', label: 'Date this year', type: 'date', half: true },
+      { name: 'region', label: 'Region or community', type: 'text', initial: 'All India' },
+    ],
+    params: (v, env) => ({ id: (env.ctx.preset?.values as Values | undefined)?.id, ...v }),
+  },
+  deleteFestival: { title: 'Delete festival', command: 'deleteFestival', submit: 'Delete', danger: true, needsCase: false, params: (_v, env) => ({ id: (env.ctx.preset?.values as Values | undefined)?.id }) },
+  messageLimits: {
+    title: 'Message limits', command: 'saveMessageSettings', submit: 'Save limits', needsCase: false,
+    intro: () => 'Instagram, X and Facebook flag accounts that send many similar messages quickly. These limits apply to each person.',
+    fields: [
+      ...MESSAGE_PLATFORMS.map(pl => ({ name: pl, label: `${pl}: messages per day`, type: 'number' as const, required: true, half: true })),
+      { name: 'gapSeconds', label: 'Seconds between messages', type: 'number', required: true, half: true },
+    ],
+    params: v => ({ daily: Object.fromEntries(MESSAGE_PLATFORMS.map(pl => [pl, v[pl]])), gapSeconds: v.gapSeconds }),
+  },
 
   // ---- claims
   sendClaimInvitation: {
@@ -503,6 +552,9 @@ const DIRECT = new Set(['openIdentityReview', 'findArtist', 'retrySearch', 'refr
 export function ActionHost({ children }: { children: ReactNode }) {
   const [state, setState] = useState<{ id: string; ctx: ActionCtx; key: number } | null>(null);
   const navigate = useNavigate();
+  // A pop-up belongs to the page it was opened on: going to another page (or Back) closes it.
+  const { pathname } = useLocation();
+  useEffect(() => { setState(null); }, [pathname]);
   const app = useApp();
   const open = useCallback((id: string, ctx: ActionCtx = {}) => {
     if (!DIRECT.has(id)) { setState({ id, ctx, key: Date.now() }); return; }
@@ -597,7 +649,7 @@ function ActionForm({ def, env, onClose }: { def: ActionDef; env: Env; onClose: 
 
   const title = typeof def.title === 'function' ? def.title(env) : def.title;
   return (
-    <Modal open onClose={onClose} title={title} description={def.intro?.(env)} width={visible.length > 5 ? 640 : 560}
+    <Modal open onClose={onClose} title={title} description={def.intro?.(env)}
       footer={confirming ? (
         <>
           <Button variant="ghost" onClick={() => setConfirming(null)}>Back</Button>
@@ -651,12 +703,7 @@ function FieldInput({ f, env, value, values, options, onChange }: { f: FieldDef;
     );
   }
   let input: ReactNode;
-  if (f.type === 'select') input = (
-    <select className="field" value={value ?? ''} onChange={e => onChange(e.target.value)}>
-      {!opts.some(o => o.value === '') && <option value="" disabled>{f.load && !options ? 'Loading…' : 'Choose…'}</option>}
-      {opts.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-    </select>
-  );
+  if (f.type === 'select') input = <Select ariaLabel={f.label} value={value ?? ''} placeholder={f.load && !options ? 'Loading…' : 'Choose…'} onChange={v => onChange(v)} options={opts.map(o => ({ value: o.value, label: o.label }))} />;
   else if (f.type === 'textarea') input = <textarea className="field" value={value ?? ''} placeholder={f.placeholder} onChange={e => onChange(e.target.value)} />;
   else if (f.type === 'case') input = <CasePicker value={value} onChange={onChange} />;
   else input = <input className="field" type={f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : 'text'} value={value ?? ''} placeholder={f.placeholder} onChange={e => onChange(e.target.value)} />;

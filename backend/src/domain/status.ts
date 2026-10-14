@@ -17,6 +17,13 @@ export const REVIEW_CHANGES_STEP = 'Review what changed';
 export function isVerified(c: ArtistCase): boolean {
   return c.verifiedProfileCount > 0 || c.claimStatus === 'Completed' || !!c.manualVerifiedAt;
 }
+/**
+ * Work on the artist has started (V2.7.2): Find artist was run, or a person verified them. Such artists leave the Artists
+ * list (only artists not started yet stay there) and are followed in Verified Artists: "In progress", then "Verified".
+ */
+export function inVerification(c: ArtistCase): boolean {
+  return !c.mergedIntoId && !c.rejectedAt && (isVerified(c) || c.discoveryStatus !== 'Not started' || ['SEARCHING', 'NEEDS_REVIEW', 'REOPENED'].includes(c.artistStatus));
+}
 function worked(m: Model, c: ArtistCase): boolean {
   if (m.byCase('discoveryJobs', c.id).some(j => j.status !== 'CANCELLED')) return true;
   // Routes the refresh engine suggests on its own do not count: only searches and people's work move an artist out of NEW.
@@ -57,6 +64,7 @@ export function syncArtistStatuses(m: Model, ctx: Ctx, caseIds: Iterable<string>
 // ------------------------------------------------------------------ artist vs collaborator
 /** Lead or performing artists (or anyone with a backend artist ID) are Artists; credited-only people are Collaborators. */
 export function kindOf(m: Model, c: ArtistCase): ArtistKind {
+  if (c.kind === 'Label') return 'Label';   // set by the directory or a person; credits never turn a label into an artist
   if (c.backendProfileIds.length) return 'Artist';
   const credits = m.creditsOfCase(c.id).filter(cr => cr.status === 'Active');
   if (!credits.length) return 'Artist';

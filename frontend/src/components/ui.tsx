@@ -1,6 +1,6 @@
 // Reusable building blocks. Every screen is composed from these so the app looks and behaves the same everywhere.
-import { ChevronDown, ChevronLeft, ChevronRight, Loader2, MoreHorizontal, X } from 'lucide-react';
-import { useEffect, useRef, useState, type ButtonHTMLAttributes, type ReactNode } from 'react';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, MoreHorizontal, X } from 'lucide-react';
+import { useCallback, useEffect, useId, useRef, useState, type ButtonHTMLAttributes, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { Link } from 'react-router-dom';
 import { STAGE_INFO, type LifecycleStage, type Tone } from '@domain/constants';
@@ -231,6 +231,106 @@ export function Pill({ active, onClick, title, count, children }: { active: bool
 export function PillBar({ label, children }: { label: string; children: ReactNode }) {
   return <div role="tablist" aria-label={label} className="scroll-none -mx-3 flex gap-1.5 overflow-x-auto px-3 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:px-0">{children}</div>;
 }
+/** A list filter as one compact dropdown with its name in front. More filters fit in one tidy row. */
+export function FilterSelect<T extends string>({ label, value, options, onChange, disabled, title }: { label: string; value: T; options: { id: T; label: string; disabled?: boolean }[]; onChange: (v: T) => void; disabled?: boolean; title?: string }) {
+  return (
+    <span className={cx('flex min-w-0 items-center gap-2 text-sm text-muted', disabled && 'opacity-60')} title={title}>
+      <span className="shrink-0 whitespace-nowrap">{label}</span>
+      <Select size="sm" className="!w-auto min-w-[11rem] max-w-full" ariaLabel={label} value={value} disabled={disabled} onChange={v => onChange(v as T)}
+        options={options.map(o => ({ value: o.id, label: o.label, disabled: o.disabled }))} />
+    </span>
+  );
+}
+
+// ------------------------------------------------------------------ dropdown
+export interface SelectOption { value: string; label: ReactNode; text?: string; hint?: ReactNode; disabled?: boolean }
+/**
+ * The app's one dropdown. A button opens a list right below it (above it when there is no room below): the chosen option
+ * is ticked, an option can carry a short hint, and the keyboard works (arrows, Home/End, Enter, Escape, type a letter).
+ */
+export function Select({ value, options, onChange, placeholder = 'Choose…', ariaLabel, disabled, size = 'md', className, id }: {
+  value: string | null | undefined; options: SelectOption[]; onChange: (v: string) => void; placeholder?: string; ariaLabel?: string; disabled?: boolean; size?: 'sm' | 'md'; className?: string; id?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const [pos, setPos] = useState<{ left: number; top?: number; bottom?: number; width: number; maxHeight: number } | null>(null);
+  const btn = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLUListElement>(null);
+  const typed = useRef({ text: '', at: 0 });
+  const uid = useId();
+  const selected = options.find(o => o.value === (value ?? ''));
+  const hinted = options.some(o => o.hint);
+  const place = useCallback(() => {
+    const r = btn.current?.getBoundingClientRect();
+    if (!r) return;
+    const below = window.innerHeight - r.bottom - 12, above = r.top - 12;
+    const width = Math.min(Math.max(r.width, hinted ? 380 : 240), window.innerWidth - 16);   // explanations need room
+    const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+    if (below >= 260 || below >= above) setPos({ left, top: r.bottom + 6, width, maxHeight: Math.min(420, below) });
+    else setPos({ left, bottom: window.innerHeight - r.top + 6, width, maxHeight: Math.min(420, above) });
+  }, [hinted]);
+  const close = useCallback((focus = true) => { setOpen(false); if (focus) btn.current?.focus(); }, []);
+  const openList = () => { if (disabled) return; place(); setActive(Math.max(0, options.findIndex(o => o.value === (value ?? '')))); setOpen(true); };
+  const choose = (o: SelectOption) => { if (o.disabled) return; onChange(o.value); close(); };
+  useEffect(() => {
+    if (!open) return;
+    const outside = (e: MouseEvent) => { const t = e.target as Node; if (!btn.current?.contains(t) && !list.current?.contains(t)) close(false); };
+    const move = () => place();
+    document.addEventListener('mousedown', outside);
+    window.addEventListener('resize', move);
+    window.addEventListener('scroll', move, true);
+    return () => { document.removeEventListener('mousedown', outside); window.removeEventListener('resize', move); window.removeEventListener('scroll', move, true); };
+  }, [open, place, close]);
+  useEffect(() => { if (open && active >= 0) list.current?.querySelector(`[data-i="${active}"]`)?.scrollIntoView({ block: 'nearest' }); }, [open, active]);
+  const step = (d: number) => {
+    let i = active;
+    for (let k = 0; k < options.length; k++) { i = (i + d + options.length) % options.length; if (!options[i].disabled) break; }
+    setActive(i);
+  };
+  const onKey = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!open) { if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(e.key)) { e.preventDefault(); openList(); } return; }
+    if (e.key === 'ArrowDown') { e.preventDefault(); step(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); step(-1); }
+    else if (e.key === 'Home') { e.preventDefault(); setActive(options.findIndex(o => !o.disabled)); }
+    else if (e.key === 'End') { e.preventDefault(); const i = [...options].reverse().findIndex(o => !o.disabled); setActive(i < 0 ? -1 : options.length - 1 - i); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); if (options[active]) choose(options[active]); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); close(); }   // closes the list, not the pop-up around it
+    else if (e.key === 'Tab') close(false);
+    else if (e.key.length === 1) {
+      const now = Date.now();
+      typed.current = { text: (now - typed.current.at < 700 ? typed.current.text : '') + e.key.toLowerCase(), at: now };
+      const i = options.findIndex(o => !o.disabled && String(o.text ?? (typeof o.label === 'string' ? o.label : o.value)).toLowerCase().startsWith(typed.current.text));
+      if (i >= 0) setActive(i);
+    }
+  };
+  return (
+    <>
+      <button ref={btn} id={id} type="button" role="combobox" disabled={disabled} aria-label={ariaLabel} aria-haspopup="listbox" aria-expanded={open}
+        aria-controls={open ? uid : undefined} aria-activedescendant={open && active >= 0 ? `${uid}-${active}` : undefined}
+        onClick={() => (open ? close() : openList())} onKeyDown={onKey}
+        className={cx('field flex items-center justify-between gap-2 text-left', size === 'sm' && '!min-h-9 !py-1.5 text-sm', open && 'border-[var(--focus)]', disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer', className)}>
+        <span className={cx('min-w-0 flex-1 truncate', selected ? 'text-ink' : 'text-faint')}>{selected?.label ?? placeholder}</span>
+        <ChevronDown size={size === 'sm' ? 15 : 17} className={cx('shrink-0 text-muted transition-transform duration-150', open && 'rotate-180')} />
+      </button>
+      {open && pos && createPortal(
+        <ul ref={list} id={uid} role="listbox" aria-label={ariaLabel}
+          className="scroll-thin fadein fixed z-[70] overflow-y-auto rounded-xl border border-line-strong bg-surface p-1.5 shadow-[var(--shadow-lg)]"
+          style={{ left: pos.left, top: pos.top, bottom: pos.bottom, width: pos.width, maxHeight: pos.maxHeight }}>
+          {options.map((o, i) => (
+            <li key={o.value} id={`${uid}-${i}`} data-i={i} role="option" aria-selected={o.value === (value ?? '')} aria-disabled={o.disabled || undefined}
+              onMouseEnter={() => { if (!o.disabled) setActive(i); }} onMouseDown={e => e.preventDefault()} onClick={() => choose(o)}
+              className={cx('flex items-start gap-2.5 rounded-lg px-3 py-2', i === active && !o.disabled && 'bg-accent-soft', o.disabled ? 'cursor-not-allowed text-faint' : 'cursor-pointer text-ink-2', o.value === (value ?? '') && 'font-medium text-ink')}>
+              <Check size={16} className={cx('mt-[3px] shrink-0 text-accent-text', o.value !== (value ?? '') && 'invisible')} />
+              <span className="min-w-0"><span className="block">{o.label}</span>{o.hint && <span className="mt-0.5 block text-xs font-normal text-muted">{o.hint}</span>}</span>
+            </li>
+          ))}
+          {!options.length && <li className="px-3 py-2 text-sm text-muted">Nothing to choose from.</li>}
+        </ul>,
+        document.body,
+      )}
+    </>
+  );
+}
 
 // ------------------------------------------------------------------ table
 /** `hide` drops a secondary column below that screen width; `stick` keeps a column (the row action) in view while a wide
@@ -292,26 +392,29 @@ export function Pagination({ page, pageSize, total, onPage }: { page: number; pa
 }
 
 // ------------------------------------------------------------------ overlays
-export function Modal({ open, onClose, title, description, children, footer, width = 560 }: { open: boolean; onClose: () => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; width?: number }) {
+/** Pop-ups open in the middle of the screen and take most of it (80% on tablets and computers, almost all on phones). */
+export function Modal({ open, onClose, title, description, children, footer }: { open: boolean; onClose: () => void; title: ReactNode; description?: ReactNode; children: ReactNode; footer?: ReactNode; width?: number }) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = overflow; };
   }, [open, onClose]);
   if (!open) return null;
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[var(--backdrop)] px-3 py-[5vh] sm:px-4" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div role="dialog" aria-modal="true" className="fadein w-full rounded-xl border border-line bg-surface shadow-[var(--shadow-lg)]" style={{ maxWidth: width }}>
-        <header className="flex items-start justify-between gap-4 border-b border-line px-4 py-3.5 sm:px-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--backdrop)] p-2 sm:p-4" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div role="dialog" aria-modal="true" className="fadein modal flex max-h-[94vh] w-full flex-col rounded-2xl border border-line bg-surface shadow-[var(--shadow-lg)] sm:max-h-[80vh] sm:w-[80vw] sm:max-w-[1500px]">
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-line px-5 py-4 sm:px-7">
           <div className="min-w-0">
-            <h2 className="text-md font-semibold text-ink">{title}</h2>
-            {description && <p className="mt-0.5 text-sm text-muted">{description}</p>}
+            <h2 className="text-xl font-semibold text-ink">{title}</h2>
+            {description && <p className="mt-1 text-base text-muted">{description}</p>}
           </div>
-          <IconButton label="Close" onClick={onClose}><X size={18} /></IconButton>
+          <IconButton label="Close" onClick={onClose}><X size={20} /></IconButton>
         </header>
-        <div className="px-4 py-4 sm:px-5">{children}</div>
-        {footer && <footer className="flex flex-wrap justify-end gap-2 rounded-b-xl border-t border-line bg-surface-2 px-4 py-3 sm:px-5">{footer}</footer>}
+        <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-5 py-5 text-base sm:px-7">{children}</div>
+        {footer && <footer className="flex shrink-0 flex-wrap justify-end gap-2 rounded-b-2xl border-t border-line bg-surface-2 px-5 py-3.5 sm:px-7">{footer}</footer>}
       </div>
     </div>,
     document.body,
@@ -356,9 +459,9 @@ export function Menu({ items, label = 'More actions', trigger, align = 'right' }
 export function Field({ label, required, help, children, className }: { label: string; required?: boolean; help?: ReactNode; children: ReactNode; className?: string }) {
   return (
     <label className={cx('block', className)}>
-      <span className="mb-1.5 block text-sm font-medium text-ink-2">{label}{required && <span className="text-[var(--t-red)]"> *</span>}</span>
+      <span className="mb-1.5 block text-[0.95rem] font-medium text-ink-2">{label}{required && <span className="text-[var(--t-red)]"> *</span>}</span>
       {children}
-      {help && <span className="mt-1 block text-xs text-muted">{help}</span>}
+      {help && <span className="mt-1 block text-sm text-muted">{help}</span>}
     </label>
   );
 }

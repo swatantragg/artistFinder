@@ -172,6 +172,40 @@ check('Reports drill-down: artists filtered by outreach stage', staged.rows.leng
 const list = e.query('artists', U, { status: 'NEW' }) as any;
 check('Artists list: status filters are views of one master list, paged on the server', list.rows.every((r: any) => r.artistStatus === 'NEW') && list.counts.ALL >= list.counts.NEW && list.rows.length <= 25 && typeof list.rows[0].collaborators === 'number');
 
+console.log('\nArtists list: top artists first (most songs, then most followers, then A–Z)');
+{
+  const all = e.query('artists', U, { scope: 'all', pageSize: 100 }) as any;
+  const before = (a: any, b: any) => a.songs > b.songs || (a.songs === b.songs && ((a.followers ?? 0) > (b.followers ?? 0) || ((a.followers ?? 0) === (b.followers ?? 0) && a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }) <= 0)));
+  check('default order: most songs, then followers, then name', all.rows.every((r: any, i: number) => !i || before(all.rows[i - 1], r)), all.rows.slice(0, 5).map((r: any) => [r.name, r.songs]));
+  check('rank numbers follow that order (artists already started are in Verified Artists, so numbers can skip)', all.rows.every((r: any, i: number) => !i || r.rank > all.rows[i - 1].rank));
+  const pair = all.rows.findIndex((r: any, i: number) => i > 0 && r.songs === all.rows[i - 1].songs);
+  if (pair > 0) {
+    const second = all.rows[pair];
+    e.m.insert('profiles', { id: 'PF-TEST-FOLLOW', caseId: second.id, collaboratorId: null, platform: 'Spotify', url: 'https://open.spotify.com/artist/x', normalizedUrl: 'open.spotify.com/artist/x', followers: 5000, verificationStatus: 'UNREVIEWED' } as any);
+    const again = (e.query('artists', U, { scope: 'all', pageSize: 100 }) as any).rows;
+    check('equal songs: the artist with more followers moves up', again.findIndex((r: any) => r.id === second.id) === pair - 1 && again.find((r: any) => r.id === second.id).followers === 5000);
+    e.m.update('profiles', 'PF-TEST-FOLLOW', { verificationStatus: 'REJECTED' } as any);
+    check('followers of a rejected profile do not count', (e.query('artists', U, { scope: 'all', pageSize: 100 }) as any).rows[pair].id === second.id);
+  }
+  const az = (e.query('artists', U, { scope: 'all', sort: 'name', dir: 'asc', pageSize: 100 }) as any).rows.map((r: any) => r.name);
+  const za = (e.query('artists', U, { scope: 'all', sort: 'name', dir: 'desc', pageSize: 100 }) as any).rows.map((r: any) => r.name);
+  const cmp = (a: string, b: string) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true });
+  check('A → Z and Z → A', az.length > 2 && az.every((n: string, i: number) => !i || cmp(az[i - 1], n) <= 0) && za.every((n: string, i: number) => !i || cmp(za[i - 1], n) >= 0), [az.slice(0, 3), za.slice(0, 3)]);
+}
+
+console.log('\nRecord contact without a route (direct, on a verified profile)');
+{
+  const d = await fixtureWorkspace();
+  // An artist whose own profile is verified but who has no route (a go-between) yet.
+  const c = d.m.all('cases').find(x => !x.mergedIntoId && x.kind === 'Artist' && ['Unresearched', 'Researching'].includes(x.lifecycleStage) && !d.m.byCase('routes', x.id).length && x.contactPreference === 'Allowed');
+  if (c) {
+    d.m.update('cases', c.id, { lifecycleStage: 'Researching', verifiedProfileCount: 1 });
+    check('Record contact is offered without a route', (d.query('caseDetail', U, { id: c.id }) as any).actions.some((a: any) => a.id === 'recordContact' && !a.disabled));
+    await d.command('recordContactAttempt', U, { caseId: c.id, routeId: null, channel: 'Instagram', recipient: c.canonicalName, message: 'DM on the verified profile', result: 'No Response', nextAction: 'Follow up' });
+    check('direct attempt recorded: Contact Attempted, no route', d.m.get('cases', c.id)!.lifecycleStage === 'Contact Attempted' && d.m.byCase('attempts', c.id).some(a => a.routeId === null));
+  } else check('fixture has an artist without a route', false);
+}
+
 console.log('\nDashboard numbers come from the records');
 const o = e.query('overview', U) as any;
 const artists = e.m.all('cases').filter(c => !c.mergedIntoId && c.kind === 'Artist');
@@ -213,6 +247,11 @@ console.log('\nLarge import in the background (20,000 rows)');
   check('other screens are answered during the import', answered);
   check(`20,000 rows imported (${((Date.now() - t0) / 1000).toFixed(1)} s)`, done.status === 'COMPLETED' && bb.acceptedCount === 20000 && bb.summary.artistsCreated === 2500, [done.status, bb.acceptedCount, bb.summary.artistsCreated]);
   check('lyricists and composers are collaborators, not artists', bb.summary.newCollaborators === 1500, bb.summary.newCollaborators);
+  const top = big.query('artists', U, {}) as any;
+  const rest = big.query('artists', U, { scope: 'all', page: 11 }) as any;
+  check('Artists opens on the top 250 by songs; “All” continues with artist 251 on page 11', top.scope === 'top' && top.total === 250 && top.everyone === 2500 && top.rows[0].rank === 1
+    && rest.rows[0].rank === 251 && rest.rows[0].songs <= (big.query('artists', U, { page: 10 }) as any).rows.at(-1).songs, [top.total, top.everyone, rest.rows[0]?.rank]);
+  check('a search looks through every artist, not only the top 250', (big.query('artists', U, { q: rest.rows[0].name }) as any).rows.some((r: any) => r.id === rest.rows[0].id));
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

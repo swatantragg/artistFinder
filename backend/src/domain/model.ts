@@ -3,8 +3,9 @@
 import type {
   ActivationEvent, ArtistCase, ArtistProfile, AuditEvent, ClaimEvent, Collaborator, ConnectionPath, Contact, ContactAttempt, Credit, DiscoveryEvidence,
   DiscoveryJob, DiscoveryQuery, DiscoveryResult, GraphEdge, GraphNode, IdentityConflict, IdentityDecision, ImportBatch, ImportRow, Meta, Notification,
-  Release, ReopenEvent, ResearchActivity, Route, StatusEvent, Task, Track, User, VerifiedProfile,
+  OutreachMessage, Release, ReopenEvent, ResearchActivity, Route, StatusEvent, Task, Track, User, VerifiedProfile,
 } from './types';
+import { DERIVED_EDGE_TYPES, DERIVED_NODE_TYPES } from './constants';
 import { coreKey, nameKey, similarKey } from './util';
 
 export interface Entities {
@@ -14,14 +15,14 @@ export interface Entities {
   activationEvents: ActivationEvent; reopens: ReopenEvent; audit: AuditEvent; notifications: Notification; meta: Meta;
   collaborators: Collaborator; profiles: ArtistProfile; verifiedProfiles: VerifiedProfile; discoveryJobs: DiscoveryJob; discoveryQueries: DiscoveryQuery;
   discoveryResults: DiscoveryResult; discoveryEvidence: DiscoveryEvidence; graphNodes: GraphNode; graphEdges: GraphEdge; connectionPaths: ConnectionPath;
-  statusEvents: StatusEvent;
+  statusEvents: StatusEvent; messages: OutreachMessage;
 }
 export type CollectionName = keyof Entities;
 export const COLLECTIONS: CollectionName[] = [
   'users', 'cases', 'batches', 'importRows', 'releases', 'tracks', 'credits', 'conflicts', 'decisions', 'contacts', 'routes',
   'research', 'attempts', 'tasks', 'claimEvents', 'activationEvents', 'reopens', 'audit', 'notifications', 'meta',
   'collaborators', 'profiles', 'verifiedProfiles', 'discoveryJobs', 'discoveryQueries', 'discoveryResults', 'discoveryEvidence', 'graphNodes', 'graphEdges', 'connectionPaths',
-  'statusEvents',
+  'statusEvents', 'messages',
 ];
 /** Collections that hang off a case and get a caseId index. */
 const BY_CASE: { c: CollectionName; key: string }[] = [
@@ -29,7 +30,7 @@ const BY_CASE: { c: CollectionName; key: string }[] = [
   { c: 'tasks', key: 'caseId' }, { c: 'claimEvents', key: 'caseId' }, { c: 'activationEvents', key: 'caseId' },
   { c: 'reopens', key: 'caseId' }, { c: 'audit', key: 'caseId' },
   { c: 'profiles', key: 'caseId' }, { c: 'verifiedProfiles', key: 'caseId' }, { c: 'discoveryJobs', key: 'caseId' }, { c: 'connectionPaths', key: 'caseId' },
-  { c: 'statusEvents', key: 'caseId' },
+  { c: 'statusEvents', key: 'caseId' }, { c: 'messages', key: 'caseId' },
 ];
 
 export type Snapshot = { [K in CollectionName]?: Entities[K][] };
@@ -45,6 +46,13 @@ function append(map: Map<string, string[]>, key: string | null | undefined, id: 
   if (!key) return;
   const list = map.get(key);
   if (list) list.push(id); else map.set(key, [id]);
+}
+
+/** Rows rebuilt when the workspace loads and never written to the database (see DERIVED_EDGE_TYPES). */
+export function isDerived(c: CollectionName, row: unknown): boolean {
+  if (c === 'graphEdges') return DERIVED_EDGE_TYPES.includes((row as GraphEdge).type);
+  if (c === 'graphNodes') return DERIVED_NODE_TYPES.includes((row as GraphNode).type);
+  return false;
 }
 
 export const profileKey = (caseId: string | null, collaboratorId: string | null, normalizedUrl: string) => `${caseId ?? `collab:${collaboratorId}`}|${normalizedUrl}`;
@@ -273,13 +281,19 @@ export class Model {
     for (const c of COLLECTIONS) (out as Record<string, unknown[]>)[c] = this.all(c);
     return out;
   }
+  /** What the database keeps: everything except the rows rebuilt on load. */
+  storedSnapshot(): Snapshot {
+    const out: Snapshot = {};
+    for (const c of COLLECTIONS) (out as Record<string, unknown[]>)[c] = this.all(c).filter(r => !isDerived(c, r));
+    return out;
+  }
   hasChanges(): boolean { return COLLECTIONS.some(c => this.created[c].size || this.updated[c].size); }
   /** Changes since the last call, split into new rows (bulk insert) and changed rows (update). */
   takeDirty(): Dirty {
     const created: Snapshot = {}, updated: Snapshot = {};
     for (const c of COLLECTIONS) {
-      if (this.created[c].size) (created as Record<string, unknown[]>)[c] = [...this.created[c]].map(id => this.data[c].get(id)).filter(Boolean);
-      if (this.updated[c].size) (updated as Record<string, unknown[]>)[c] = [...this.updated[c]].map(id => this.data[c].get(id)).filter(Boolean);
+      if (this.created[c].size) (created as Record<string, unknown[]>)[c] = [...this.created[c]].map(id => this.data[c].get(id)).filter(r => r && !isDerived(c, r));
+      if (this.updated[c].size) (updated as Record<string, unknown[]>)[c] = [...this.updated[c]].map(id => this.data[c].get(id)).filter(r => r && !isDerived(c, r));
       this.created[c].clear(); this.updated[c].clear();
     }
     return { created, updated };

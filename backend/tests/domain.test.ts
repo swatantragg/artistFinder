@@ -383,7 +383,9 @@ console.log('\nArtist discovery engine (spec §89)');
   check('stale threshold is configurable', (ed.query('discoveryDetail', U, { id: C('A010') }) as any).verified[0].stale === false);
   // do not contact
   const lata = C('A027');
-  await ed.command('findConnection', U, { caseId: lata });
+  // Connections are kept for the top 250 artists only (Lata Joshi ranks lower in the fixture's 1,251 artists).
+  await rejects('outside the top 250 artists: no connection search', ed.command('findConnection', U, { caseId: lata }), /top 250/);
+  check('…and the action is shown switched off with the reason', (ed.query('caseDetail', U, { id: lata }) as any).actions.filter((a: any) => a.id === 'findConnection').every((a: any) => /top 250/.test(a.disabled ?? '')));
   const lp = md.byCase('connectionPaths', lata)[0];
   if (lp) await rejects('do-not-contact: no route from a connection path', ed.command('createRouteFromPath', U, { pathId: lp.id }), /contact/i);
   check('do-not-contact artist can still be enriched by discovery', md.get('cases', lata)!.verifiedProfileCount > 0 && md.get('cases', lata)!.contactPreference === 'Do Not Contact');
@@ -412,7 +414,7 @@ console.log('\nArtist discovery engine (spec §89)');
   const g = ed.query('caseGraph', U, { id: rid }) as any;
   check('connection graph: artist, songs, collaborators, profiles, contacts, routes', ['Artist', 'Song', 'Profile', 'Contact', 'Route'].every(t => g.nodes.some((n: any) => n.type === t)) && g.edges.some((e: any) => e.status === 'verified') && g.edges.every((e: any) => e.evidence));
   const g2 = ed.query('caseGraph', U, { id: rid, depth: 2 }) as any;
-  check('depth 2 adds second-degree connections', g2.nodes.length > g.nodes.length);
+  check('only the closest connections are shown (no second-degree songs, even when asked)', g2.nodes.length === g.nodes.length && g.inScope === true);
   check('graph shows Rahul → “Dil Ka Safar” → Joshua → contact', g.nodes.some((n: any) => n.label === 'Dil Ka Safar') && g.nodes.some((n: any) => n.label === 'Joshua Singh') && g.edges.some((e: any) => e.type === 'PERSON_HAS_CONTACT'));
 }
 {

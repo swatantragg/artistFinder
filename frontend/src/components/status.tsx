@@ -18,6 +18,7 @@ export function GoongoonaloBadge({ status, className, compact }: { status: strin
   );
 }
 export function KindBadge({ kind }: { kind: string }) {
+  if (kind === 'Label') return <Badge tone="blue" title="A record label, company or rights holder: kept apart from artists (Artists → Who → Labels)">Label</Badge>;
   if (kind !== 'Collaborator') return null;
   return <Badge tone="neutral" title="Only credited as composer, lyricist, producer … (not as a lead or performing artist)">Collaborator</Badge>;
 }

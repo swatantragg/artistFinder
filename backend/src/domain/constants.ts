@@ -43,15 +43,17 @@ export const ARTIST_STATUS_INFO: Record<ArtistStatus, { label: string; tone: Ton
   VERIFIED: { label: 'Verified', tone: 'green', meaning: 'A person verified the artist’s identity (verified profiles, a completed claim or a confirmation by hand).' },
   REJECTED: { label: 'Rejected', tone: 'red', meaning: 'Not a real artist record (e.g. test content or a label name). Kept with the reason.' },
 };
-export const GOONGOONALO_STATUSES = ['PENDING', 'GOONGOONALO', 'REJECTED', 'DO_NOT_CONTACT'] as const;
+export const GOONGOONALO_STATUSES = ['PENDING', 'GOONGOONALO', 'NOT_MEMBER', 'REJECTED', 'DO_NOT_CONTACT'] as const;
 export type GoongoonaloStatus = (typeof GOONGOONALO_STATUSES)[number];
 export const GOONGOONALO_INFO: Record<GoongoonaloStatus, { label: string; tone: Tone; meaning: string }> = {
-  PENDING: { label: 'Pending', tone: 'neutral', meaning: 'No decision about Goongoonalo yet.' },
-  GOONGOONALO: { label: 'Goongoonalo', tone: 'green', meaning: 'The artist is on Goongoonalo.' },
+  PENDING: { label: 'Pending', tone: 'neutral', meaning: 'Not answered yet: is the artist on Goongoonalo?' },
+  GOONGOONALO: { label: 'Goongoonalo', tone: 'green', meaning: 'The artist is on Goongoonalo: member messages and festival greetings.' },
+  NOT_MEMBER: { label: 'Not on Goongoonalo yet', tone: 'blue', meaning: 'Not on Goongoonalo yet: invite the artist to join and claim their profile.' },
   REJECTED: { label: 'Rejected', tone: 'red', meaning: 'Not a fit for Goongoonalo (decided by a person).' },
   DO_NOT_CONTACT: { label: 'Do not contact', tone: 'orange', meaning: 'The artist asked not to be contacted. Outreach is blocked.' },
 };
-export const ARTIST_KINDS = ['Artist', 'Collaborator'] as const;
+/** Label = a record label, company or rights holder (kept apart from artists: own list, never in the artist top 250). */
+export const ARTIST_KINDS = ['Artist', 'Collaborator', 'Label'] as const;
 export type ArtistKind = (typeof ARTIST_KINDS)[number];
 
 export const WORK_REASONS = ['New Artist', 'New Lead', 'Follow-up', 'Metadata Gap', 'Technical Issue', 'Re-engagement'] as const;
@@ -70,10 +72,11 @@ export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
 export const ACTIVATION_STATUSES = ['Not Started', 'Access Verified', 'Feature Selected', 'Activated'] as const;
 export type ActivationStatus = (typeof ACTIVATION_STATUSES)[number];
 
-export const ROUTE_STATES = ['Candidate', 'Verified', 'Selected', 'Rejected', 'Exhausted'] as const;
+/** Deleted: removed by a person; hidden everywhere but kept in the timeline. */
+export const ROUTE_STATES = ['Candidate', 'Verified', 'Selected', 'Rejected', 'Exhausted', 'Deleted'] as const;
 export type RouteState = (typeof ROUTE_STATES)[number];
 
-export const CHANNELS = ['Email', 'Phone', 'WhatsApp', 'Instagram', 'Introducer', 'Other'] as const;
+export const CHANNELS = ['Email', 'Phone', 'WhatsApp', 'Instagram', 'X', 'Facebook', 'Introducer', 'Other'] as const;
 /** "Verified WhatsApp", "Verified email": brand names keep their capitals. */
 export const contactLabel = (verified: boolean, channel: string) => `${verified ? 'Verified' : 'Unverified'} ${channel === 'Email' || channel === 'Phone' || channel === 'Other' ? channel.toLowerCase() : channel}`;
 export type Channel = (typeof CHANNELS)[number];
@@ -137,7 +140,7 @@ export const DISCOVERY_JOB_STATUSES = ['QUEUED', 'SEARCHING', 'PROCESSING', 'COM
 export type DiscoveryJobStatus = (typeof DISCOVERY_JOB_STATUSES)[number];
 export const ACTIVE_JOB_STATUSES: DiscoveryJobStatus[] = ['QUEUED', 'SEARCHING', 'PROCESSING'];
 /** Per-artist discovery state, kept separate from the lifecycle stage. */
-export const DISCOVERY_CASE_STATUSES = ['Not started', 'Queued', 'Searching', 'Needs verification', 'Verified', 'No candidate', 'Failed'] as const;
+export const DISCOVERY_CASE_STATUSES = ['Not started', 'Queued', 'Searching', 'Needs verification', 'Verified', 'No candidate', 'Failed', 'Needs decision'] as const;
 export type DiscoveryCaseStatus = (typeof DISCOVERY_CASE_STATUSES)[number];
 export const DISCOVERY_STEPS = ['Generating queries', 'Searching web', 'Searching supported APIs', 'Analyzing songs', 'Analyzing collaborators', 'Building graph', 'Preparing candidates'] as const;
 export type DiscoveryMode = 'full' | 'refresh' | 'targeted';
@@ -155,7 +158,7 @@ export const EVIDENCE_KINDS = [
   'Name match', 'Alias match', 'Partial name match', 'Song match', 'ISRC match', 'Catalogue match', 'Role match', 'Label match', 'Distributor match',
   'Collaborator match', 'Official website match', 'Cross-platform match', 'Language match', 'Location match',
   'Different profession', 'Songs of another artist', 'Previously rejected', 'Name differs', 'Different language', 'Different location',
-  'Handle match', 'Music profile', 'Fan or compilation page',
+  'Handle match', 'Music profile', 'Fan or compilation page', 'Label or company page',
 ] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
@@ -175,3 +178,28 @@ export const DISCOVERY_DEFAULTS = { staleDays: 90, cacheDays: 7, concurrency: 2 
 
 /** Progress steps shown at the top of every dossier. */
 export const PROGRESS_STEPS = ['Identified', 'Identity Verified', 'Research', 'Route Ready', 'Contact', 'Claim', 'Activation', 'ARM'] as const;
+
+// ------------------------------------------------------------------ messages (outreach by direct message)
+/** Messages go out as direct messages on the artist's own verified profiles: a person presses Send in the app's tab. */
+export const MESSAGE_PLATFORMS = ['Instagram', 'X', 'Facebook'] as const;
+export type MessagePlatform = (typeof MESSAGE_PLATFORMS)[number];
+export const MESSAGE_KINDS = ['invite', 'member', 'followup', 'greeting'] as const;
+export type MessageKind = (typeof MESSAGE_KINDS)[number];
+export const MESSAGE_KIND_INFO: Record<MessageKind, { label: string; meaning: string }> = {
+  invite: { label: 'Join invitation', meaning: 'For artists not on Goongoonalo yet: an introduction and an invitation to join and claim their profile.' },
+  member: { label: 'Member message', meaning: 'For artists already on Goongoonalo: how to start using their profile.' },
+  followup: { label: 'Follow-up', meaning: 'Sent 3, 7 and 14 days after the first message when there is no reply (at most 3).' },
+  greeting: { label: 'Festival greeting', meaning: 'Only for artists on Goongoonalo who said yes to greetings.' },
+};
+/** What the artist answered. Every answer stops the follow-ups. */
+export const REPLY_OUTCOMES = ['Interested', 'Replied', 'Not interested', 'Do not disturb', 'Could not deliver', 'Yes to greetings', 'Stop greetings'] as const;
+export type ReplyOutcome = (typeof REPLY_OUTCOMES)[number];
+export const GREETINGS_CONSENTS = ['Unknown', 'Yes', 'No'] as const;
+export type GreetingsConsent = (typeof GREETINGS_CONSENTS)[number];
+
+// ------------------------------------------------------------------ storage
+/** The catalogue part of the graph (song ↔ artist, label, distributor, and the people and organisations on it) is rebuilt
+ *  from songs and credits when the workspace loads, for the top artists only, and is never stored: it repeated what the
+ *  songs and credits already say (40% of the database). Nodes of profiles, contacts, routes and collaborators stay stored. */
+export const DERIVED_EDGE_TYPES: readonly RelationshipType[] = ['ARTIST_PERFORMED_SONG', 'ARTIST_COMPOSED_SONG', 'ARTIST_PRODUCED_SONG', 'PERSON_CREDITED_ON_SONG', 'SONG_ON_RELEASE', 'SONG_RELEASED_ON_LABEL', 'SONG_DISTRIBUTED_BY'];
+export const DERIVED_NODE_TYPES: readonly GraphNodeType[] = ['Song', 'Release', 'Artist', 'Person', 'Label', 'Distributor'];

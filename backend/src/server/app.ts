@@ -13,12 +13,24 @@ import express, { type Express, type NextFunction, type Request, type Response }
 import * as XLSX from 'xlsx';
 import { RuleError, type Engine } from '../domain/engine';
 import { can } from '../domain/ops';
+import type { VerifiedExport } from '../domain/exports';
+import { verifiedWorkbook } from './exports';
 import type { Auth } from './auth';
 
 /**
  * The API routes on top of one engine. Every route except health and sign-in needs a signed-in user (auth.ts); writes
  * are recorded under that person. `reset` decides what "start again" loads (the app: an empty workspace).
  */
+export const DATABASE_DOWN = 'The database cannot be reached right now (for example, its plan’s monthly limit is used up). Signing in and saving are paused and nothing was saved. Try again later.';
+/** Prisma errors that mean the database is unreachable (down, blocked or out of quota), not a bug in the request. */
+const DB_DOWN_CODES = new Set(['P1001', 'P1002', 'P1008', 'P1017', 'P2024']);
+export function databaseDown(err: unknown): boolean {
+  const e = err as { name?: string; code?: string; errorCode?: string } | null;
+  if (!e) return false;
+  if (e.name === 'PrismaClientInitializationError') return true;
+  return e.name === 'PrismaClientKnownRequestError' && DB_DOWN_CODES.has(String(e.code ?? e.errorCode));
+}
+
 export function createApi(engine: Engine, auth: Auth, opts: { reset?: () => Promise<{ cases: number }>; ready?: () => boolean } = {}): Express {
   const reset = opts.reset ?? (() => engine.reset('empty'));
   const app = express();
@@ -116,12 +128,24 @@ export function createApi(engine: Engine, auth: Auth, opts: { reset?: () => Prom
     }, user(req, res));
     res.status(202).json({ job });
   });
+  // Verified artists as Excel, in the artist directory's layout (social links: one column per platform)
+  app.get('/api/export/verified-artists.xlsx', (req, res) => {
+    const data = engine.query('verifiedExport', user(req, res)) as VerifiedExport;
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="verified-artists-${data.generatedAt.slice(0, 10)}.xlsx"`);
+    res.send(verifiedWorkbook(data));
+  });
   app.get('/api/import/jobs/:id', (req, res) => {
     const job = engine.importJob(String(req.params.id));
     if (!job) { res.status(404).json({ error: 'Import job not found (it may have finished before a restart: see Imports).' }); return; }
     res.json(job);
   });
 
+  // Keep only the verified artists (and everything that is theirs); everything else is removed. System Owner only.
+  app.post('/api/admin/keep-verified', async (req, res) => {
+    if (req.body?.confirm !== 'KEEP VERIFIED') { res.status(422).json({ error: 'Type KEEP VERIFIED to confirm.' }); return; }
+    res.json(await engine.keepOnlyVerified(user(req, res)));
+  });
   app.post('/api/admin/reset', async (req, res) => {
     if (!can(engine.m, user(req, res), 'resetWorkspace')) { res.status(403).json({ error: 'Only the System Owner can delete all data.' }); return; }
     res.json(await reset());
@@ -132,6 +156,11 @@ export function createApi(engine: Engine, auth: Auth, opts: { reset?: () => Prom
     if (res.headersSent) { next(err); return; }
     if (err instanceof RuleError) { res.status((err as RuleError & { status?: number }).status ?? 422).json({ error: err.message }); return; }
     if ((err as { type?: string })?.type === 'entity.parse.failed') { res.status(400).json({ error: 'The request was not valid JSON.' }); return; }
+    if (databaseDown(err)) {
+      console.error(`Database not reachable: ${String((err as Error).message ?? err).trim().split('\n').pop()}`);
+      res.status(503).json({ error: DATABASE_DOWN });
+      return;
+    }
     console.error(err);
     res.status(500).json({ error: 'Something went wrong on the server. Nothing was saved.' });
   });

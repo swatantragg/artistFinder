@@ -18,6 +18,7 @@ interface Res {
     summary: {
       artistsCreated: number; artistsUpdated: number; newSongs: number; updatedSongs: number; newCredits: number; reopenedCases: number; newTasks: number; newRoutes: number; claimChanges: number; activationChanges: number; identityExceptions: number;
       errors: string[]; warnings: string[]; classes: Record<string, number>; targetedJobIds?: string[]; artistCaseIds?: string[];
+      directory?: { profiles: number; members: number; deceased: number; notIndividual: number; labels: number; placeholders?: number; noneFound: number; core: number; songs: number };
       artistsFound?: number; newCollaborators?: number; possibleDuplicates?: number; reopenedArtistIds?: string[]; mapping?: { field: string; column: string }[]; unmappedColumns?: string[]; headerRow?: number; encoding?: string;
     };
   };
@@ -62,6 +63,21 @@ export default function ImportResult() {
       {s.warnings.map(w => <div key={w} className="mt-2"><Notice tone="neutral">{w}</Notice></div>)}
       {(s.targetedJobIds?.length ?? 0) > 0 && <div className="mt-2"><Notice tone="blue" icon={<ScanSearch size={16} />} title={`Targeted discovery started for ${s.targetedJobIds!.length} artist${s.targetedJobIds!.length === 1 ? '' : 's'} already searched`}>New songs or collaborators arrived for artists the software already researched. Only the new evidence is searched; verified profiles and earlier results are kept.</Notice></div>}
       {b.status === 'Repeat' && (s.artistCaseIds?.length ?? 0) > 0 && <div className="mt-4"><ImportArtists batchId={b.id} repeat /></div>}
+
+      {b.status !== 'Repeat' && s.directory && (
+        <Card className="mt-4" title="Artist directory: what the columns did" subtitle="Each row is one artist. Nothing is verified or sent automatically: a person reviews the profiles and decides.">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Stat label="Song titles added" value={s.directory.songs} />
+            <Stat label="Profiles to verify" value={s.directory.profiles} tone="violet" to="/verified?view=progress&status=NEEDS_REVIEW" sub="Social link column, with confidence" />
+            <Stat label="On Goongoonalo" value={s.directory.members} tone="green" to="/status?tab=members" sub="Verified = Yes" />
+            <Stat label="Core members" value={s.directory.core} sub="Core member = Yes" />
+            <Stat label="Passed away: decide" value={s.directory.deceased} tone={s.directory.deceased ? 'orange' : undefined} to="/verified?view=progress&status=DECIDE" sub="Continue or remove" />
+            <Stat label="Labels / companies" value={s.directory.labels + s.directory.notIndividual} to="/artists?kind=Label&scope=all" sub="Own list: Artists → Who → Labels" />
+            <Stat label="Placeholder credits set aside" value={s.directory.placeholders ?? 0} to="/artists?status=REJECTED" sub="“Traditional”, “Instrumental” …" />
+            <Stat label="Researched, none found" value={s.directory.noneFound} />
+          </div>
+        </Card>
+      )}
 
       {b.status !== 'Repeat' && (
         <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-6">

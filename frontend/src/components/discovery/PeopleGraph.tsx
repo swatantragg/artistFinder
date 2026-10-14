@@ -12,7 +12,7 @@ import { num, plural } from '../../lib/format';
 
 interface SharedSong { id: string; title: string; album: string; roles: string[]; mine: string[] }
 interface Person { key: string; name: string; caseId: string | null; kind: string; verified: boolean; roles: string[]; songCount: number; songs: SharedSong[] }
-interface Network { center: { id: string; name: string; artistId: string | null; verified: boolean }; people: Person[] }
+interface Network { center: { id: string; name: string; artistId: string | null; verified: boolean }; people: Person[]; inScope?: boolean; topSize?: number; rank?: number | null }
 
 const FIRST = 16;            // people shown before "Show all" (readable without zooming)
 const PER_COLUMN = 8, COL = 300, ROW = 86, GAP = 340;
@@ -78,6 +78,7 @@ function Graph({ caseId, height }: { caseId: string; height: number }) {
   const person = data?.people.find(p => p.key === sel) ?? null;
 
   if (!data) return <Skeleton className="h-96" />;
+  if (data.inScope === false) return <Empty title={`The connection graph is kept for the top ${data.topSize} artists.`} text={`They are the artists with the most songs${data.rank ? `; ${data.center.name} is #${data.rank.toLocaleString('en-IN')}` : ''}. The Collaborators tab still lists everyone this artist worked with.`} />;
   if (!data.people.length) return <Empty title="No connections yet." text="People appear here when songs credit other singers, composers, lyricists or producers next to this artist." />;
   return (
     <div className="overflow-hidden rounded-lg border border-line bg-surface shadow-[var(--shadow)]">

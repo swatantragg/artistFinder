@@ -5,11 +5,16 @@ import {
 } from './constants';
 import type { Model } from './model';
 import {
-  OUTREACH_KINDS, audit, can, closeTasks, computePriority, evidenceChanged, finishTask, getCase, newCaseRecord, notify, openTask, openTasks,
+  OUTREACH_KINDS, audit, can, closeTasks, notUndone, computePriority, evidenceChanged, finishTask, getCase, newCaseRecord, notify, openTask, openTasks,
   outreachBlocked, outreachTaskFor, requirePerm, routeLabel, rule, selectRoute, setField, setStage, stageIndex, syncNextAction, userName, waitingDefaults,
 } from './ops';
 import { applyLeads, leadsForContact, leadsForTracks } from './refresh';
 import { discoveryCommands } from './discovery/commands';
+import { syncDiscoveryState } from './discovery/pipeline';
+import { diedText } from './life';
+import { TOP_ARTISTS, topArtistIds } from './views';
+import { messageCommandsWith } from './messages';
+import { undoCommands } from './undo';
 import { scanDuplicates } from './dedupe';
 import { clearReopen, reopenArtist, setGoongoonaloStatus, syncArtistStatus } from './status';
 import { syncContactGraph, syncRouteGraph, syncTrackGraph } from './graph';
@@ -30,14 +35,14 @@ function getRoute(m: Model, id: string): Route { const r = m.get('routes', id); 
 
 /** Which stages may be set by hand, and what evidence each needs (spec §45). */
 export function stageGate(m: Model, c: ArtistCase, target: LifecycleStage): string | null {
-  const ev = (k: 'claimEvents' | 'activationEvents', type: string) => m.familyItems(k, c.id).some(e => e.type === type);
+  const ev = (k: 'claimEvents' | 'activationEvents', type: string) => notUndone(m.familyItems(k, c.id) as { type: string; undoneAt?: string | null }[]).some(e => e.type === type);
   switch (target) {
     case 'Unresearched': case 'Researching': case 'Closed': return null;
     case 'Identity Review': return null;
     case 'Waiting for Evidence': return 'Use “Move to Waiting for Evidence” so the blocker and next review date are recorded.';
     case 'Route Ready': return m.byCase('routes', c.id).some(r => r.state === 'Selected') ? null : 'Route Ready needs a selected, verified route.';
-    case 'Introduction Pending': case 'Contact Attempted': return m.byCase('attempts', c.id).length ? null : 'Record a contact attempt first.';
-    case 'Contact Confirmed': return m.byCase('attempts', c.id).some(a => CONFIRMING_RESULTS.includes(a.result)) ? null : 'Contact Confirmed needs a contact attempt where the correct artist or representative was reached.';
+    case 'Introduction Pending': case 'Contact Attempted': return notUndone(m.byCase('attempts', c.id)).length ? null : 'Record a contact attempt first.';
+    case 'Contact Confirmed': return notUndone(m.byCase('attempts', c.id)).some(a => CONFIRMING_RESULTS.includes(a.result)) ? null : 'Contact Confirmed needs a contact attempt where the correct artist or representative was reached.';
     case 'Claim Invited': return ev('claimEvents', 'Invited') ? null : 'Use “Send claim invitation”.';
     case 'Claim Submitted': return ev('claimEvents', 'Submitted') ? null : 'Use “Record claim submission”.';
     case 'Claim Review': return ev('claimEvents', 'Sent to Review') ? null : 'Use “Send to review”.';
@@ -110,8 +115,9 @@ export const commands: Record<string, Command> = {
     const reason = req(p.reason, 'A reason');
     const until = pref === 'Later' ? req(p.until, 'A date (required for “Later”)') : null;
     if (until && until <= ctx.today) throw rule('“Later” needs a future date.');
+    const before = c.contactPreference + (c.contactPreferenceUntil ? ` until ${c.contactPreferenceUntil}` : '');   // read before the update changes c
     m.update('cases', c.id, { contactPreference: pref, contactPreferenceUntil: until, updatedAt: ctx.now });
-    audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Contact preference changed', field: 'contactPreference', from: c.contactPreference, to: pref + (until ? ` until ${until}` : ''), reason });
+    audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Contact preference changed', field: 'contactPreference', from: before, to: pref + (until ? ` until ${until}` : ''), reason });
     if (pref === 'Do Not Contact' || pref === 'Declined') {
       closeTasks(m, ctx, c.id, OUTREACH_KINDS, `Cancelled: contact preference ${pref}`, 'Cancelled');
       if (stageIndex(c.lifecycleStage) < stageIndex('Claim Invited') && c.lifecycleStage !== 'Closed') {
@@ -226,7 +232,7 @@ export const commands: Record<string, Command> = {
     const state = p.state === 'Verified' ? 'Verified' : 'Candidate';
     const evidence = req(p.evidence, 'Evidence for the route');
     if (state === 'Verified' && !(contact?.verified || clean(p.sourceUrl))) throw rule('A verified route needs a verified contact or a source URL.');
-    if (contact && m.byCase('routes', c.id).some(r => r.contactId === contact.id)) throw rule(`A route through ${contact.personName} already exists for this case.`);
+    if (contact && m.byCase('routes', c.id).some(r => r.state !== 'Deleted' && r.contactId === contact.id)) throw rule(`A route through ${contact.personName} already exists for this case.`);
     const track = p.trackId ? m.get('tracks', p.trackId) : null;
     const r = m.insert('routes', {
       id: m.nextId('RT', 4), targetCaseId: c.id, trackId: track?.id ?? null, collaboratorName: clean(p.collaboratorName) || (contact && !contact.organisation && contact.caseId !== c.id ? contact.personName : null),
@@ -273,6 +279,46 @@ export const commands: Record<string, Command> = {
     }
     computePriority(m, c, ctx.today);
     return { message: `Route ${r.id} marked ${target}.`, caseId: c.id };
+  },
+  /**
+   * The artist's own verified profile as the route: a direct message on it reaches the artist. The route is created once
+   * (verified, from the profile) and selected; members get member messages and greetings through it, others the claim.
+   */
+  useProfileAsRoute(m, ctx, p) {
+    const c = getCase(m, p.caseId);
+    const url = req(p.url, 'The profile');
+    const vp = m.familyItems('verifiedProfiles', c.id).find(v => v.verificationStatus === 'VERIFIED' && v.url === url);
+    if (!vp) throw rule('Pick one of the artist’s verified profiles.');
+    let r = m.byCase('routes', c.id).find(x => x.state !== 'Deleted' && x.sourceUrl === url);
+    if (r && (r.state === 'Rejected' || r.state === 'Exhausted')) throw rule(`This profile was tried before and marked ${r.state.toLowerCase()}${r.rejectionReason ? ` (${r.rejectionReason})` : ''}. Pick another way to reach the artist.`);
+    if (!r) {
+      const made = commands.addRoute(m, ctx, { caseId: c.id, sourceUrl: url, state: 'Verified', evidence: `${c.canonicalName}’s own verified ${vp.platform} profile: a direct message reaches the artist`, confidence: 95, origin: 'Verified profile' });
+      r = m.get('routes', made.id!)!;
+    }
+    if (r.state !== 'Selected') commands.updateRoute(m, ctx, { routeId: r.id, state: 'Selected', reason: `Direct message on ${vp.platform}` });
+    return { message: `Route chosen: direct message on ${vp.platform}${vp.username ? ` @${vp.username}` : ''}.`, caseId: c.id, id: r.id };
+  },
+  /** Delete a route: it disappears from every list and the graph; the timeline keeps what happened. */
+  deleteRoute(m, ctx, p) {
+    const r = getRoute(m, p.routeId);
+    if (r.state === 'Deleted') throw rule(`Route ${r.id} is already deleted.`);
+    const c = getCase(m, r.targetCaseId);
+    const reason = clean(p.reason) || 'Deleted by hand';
+    const label = routeLabel(m, r.id);
+    m.update('routes', r.id, { state: 'Deleted', rejectionReason: reason, lastChecked: ctx.now });
+    audit(m, ctx, { caseId: c.id, entity: 'Route', entityId: r.id, action: 'Route deleted', field: 'state', from: r.state, to: 'Deleted', reason, evidence: label });
+    syncRouteGraph(m, ctx, r.id);
+    // The connection it came from can become a route again.
+    for (const path of m.byCase('connectionPaths', c.id)) if (path.routeId === r.id) m.update('connectionPaths', path.id, { status: 'SUGGESTED', routeId: null, decidedAt: ctx.now, decidedBy: ctx.userId });
+    if (r.state === 'Selected' && ['Route Ready', 'Contact Attempted', 'Introduction Pending'].includes(c.lifecycleStage)) {
+      closeTasks(m, ctx, c.id, OUTREACH_KINDS, `Route ${r.id} deleted`, 'Cancelled');
+      const others = m.byCase('routes', c.id).filter(x => x.state === 'Verified');
+      setStage(m, ctx, c, 'Researching', `Selected route deleted: ${reason}`);
+      openTask(m, ctx, m.get('cases', c.id)!, { kind: 'Research', step: others.length ? 'Select another verified route' : 'Research a new route (or message the artist directly)', why: `Route ${r.id} deleted`, trigger: 'Route deleted' });
+    }
+    computePriority(m, m.get('cases', c.id)!, ctx.today);
+    syncNextAction(m, c.id);
+    return { message: `Route ${r.id} deleted.`, caseId: c.id };
   },
 
   addContact(m, ctx, p) {
@@ -358,7 +404,8 @@ export const commands: Record<string, Command> = {
       if (route.state === 'Candidate') throw rule('Verify the route before using it.');
       if (route.state === 'Rejected' || route.state === 'Exhausted') throw rule(`Route ${route.id} is ${route.state.toLowerCase()}. Pick another route.`);
       if (route.state === 'Verified') { selectRoute(m, ctx, c, route, 'Used for contact'); route = m.get('routes', route.id)!; }
-    } else if (c.lifecycleStage === 'Researching') throw rule('Pick the route you used (select or add a verified route first).');
+    }
+    // No route = direct contact: the artist's own verified profile, email or phone. Nobody in between, so no route is needed.
     if (result === 'Later' && !clean(p.laterDate)) throw rule('“Later” needs the agreed date.');
     const a = m.insert('attempts', {
       id: m.nextId('CA', 4), caseId: c.id, routeId: route?.id ?? null, date: ctx.now, channel, recipient, message: clean(p.message), result,
@@ -372,7 +419,11 @@ export const commands: Record<string, Command> = {
     const isIntro = channel === 'Introducer' || !!route?.collaboratorName || !!route?.organisation;
     let message = `Contact attempt ${a.id} recorded: ${result}.`;
     if (CONFIRMING_RESULTS.includes(result)) {
-      if (c.contactPreference !== 'Allowed') m.update('cases', c.id, { contactPreference: 'Allowed', contactPreferenceUntil: null });
+      if (c.contactPreference !== 'Allowed') {
+        const before = c.contactPreference + (c.contactPreferenceUntil ? ` until ${c.contactPreferenceUntil}` : '');
+        m.update('cases', c.id, { contactPreference: 'Allowed', contactPreferenceUntil: null });
+        audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Contact preference changed', field: 'contactPreference', from: before, to: 'Allowed', reason: `${recipient} reached: ${result}` });
+      }
       if (c.workReason === 'New Lead' || c.workReason === 'New Artist') setField(m, ctx, cc(), 'workReason', 'Follow-up', 'Artist reached: the work now follows up the claim');
       setStage(m, ctx, cc(), 'Contact Confirmed', `${recipient} reached: ${result}${a.evidence ? ` (${a.evidence})` : ''}`, a.evidence);
       openTask(m, ctx, cc(), { kind: 'Claim', step: result === 'Needs Help' ? 'Help call, then send the claim invitation' : 'Send the claim invitation', why: `Conversation confirmed with ${recipient}`, trigger: `Contact attempt ${a.id}`, dueDate: clean(p.nextActionDate) || ctx.today, priority: 'High' });
@@ -383,7 +434,7 @@ export const commands: Record<string, Command> = {
       openTask(m, ctx, cc(), { kind: 'Introduction', step: `Wait for ${recipient} to make the introduction`, why: 'Introducer contacted is not artist contacted', trigger: `Contact attempt ${a.id}`, dueDate: clean(p.nextActionDate) || addWorkingDays(ctx.today, 3), status: 'Waiting' });
     } else if (result === 'No Response') {
       if (stageIndex(c.lifecycleStage) < stageIndex('Contact Attempted') && c.lifecycleStage !== 'Introduction Pending') setStage(m, ctx, cc(), 'Contact Attempted', isIntro ? `Introduction requested from ${recipient}; no reply yet` : 'Message sent; no reply yet');
-      const n = m.byCase('attempts', c.id).filter(x => x.routeId === (route?.id ?? null) && x.result === 'No Response').length;
+      const n = notUndone(m.byCase('attempts', c.id)).filter(x => x.routeId === (route?.id ?? null) && x.result === 'No Response').length;
       if (n >= 3) {
         openTask(m, ctx, cc(), { kind: 'Follow-up', step: 'Supervisor review: no reply after two follow-ups', why: `${n} attempts without a reply via ${route ? route.id : channel}`, trigger: `Contact attempt ${a.id}`, ownerId: supervisor(m) ?? c.ownerId, dueDate: ctx.today });
         message += ' No reply after two follow-ups: supervisor review created. Try another route or move to Waiting.';
@@ -402,8 +453,9 @@ export const commands: Record<string, Command> = {
       message += others.length ? ' Route rejected. Another verified route is available.' : ' Route rejected. Research a new route.';
     } else if (result === 'Later') {
       const until = clean(p.laterDate);
+      const before = c.contactPreference + (c.contactPreferenceUntil ? ` until ${c.contactPreferenceUntil}` : '');
       m.update('cases', c.id, { contactPreference: 'Later', contactPreferenceUntil: until });
-      audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Contact preference changed', field: 'contactPreference', from: c.contactPreference, to: `Later until ${until}`, reason: `Asked by ${recipient}` });
+      audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Contact preference changed', field: 'contactPreference', from: before, to: `Later until ${until}`, reason: `Asked by ${recipient}` });
       setStage(m, ctx, cc(), 'Contact Confirmed', `${recipient} asked to talk again on ${until}`);
       openTask(m, ctx, cc(), { kind: 'Follow-up', step: 'Agreed callback', why: `Asked to be contacted on ${until}`, trigger: `Contact attempt ${a.id}`, dueDate: until, status: 'Waiting' });
     } else if (result === 'Declined' || result === 'Do Not Contact') {
@@ -506,8 +558,9 @@ export const commands: Record<string, Command> = {
     const profileId = req(p.profileId, 'Profile ID');
     const recipient = req(p.recipient, 'Recipient');
     const e = m.insert('claimEvents', { id: m.nextId('CE', 4), caseId: c.id, type: 'Invited', date: ctx.now, profileId, claimRequestId: null, recipient, reviewerId: null, notes: clean(p.notes), evidence: clean(p.evidence), actorId: ctx.userId, source: 'User' });
+    const before = c.claimStatus;   // read before the update changes c
     m.update('cases', c.id, { claimStatus: 'Invited' });
-    audit(m, ctx, { caseId: c.id, entity: 'ClaimEvent', entityId: e.id, action: 'Claim invitation sent', field: 'claimStatus', from: c.claimStatus, to: 'Invited', reason: `Profile ${profileId} → ${recipient}` });
+    audit(m, ctx, { caseId: c.id, entity: 'ClaimEvent', entityId: e.id, action: 'Claim invitation sent', field: 'claimStatus', from: before, to: 'Invited', reason: `Profile ${profileId} → ${recipient}` });
     closeTasks(m, ctx, c.id, ['Claim'], 'Claim invitation sent');
     setStage(m, ctx, c, 'Claim Invited', `Claim link for ${profileId} sent to ${recipient}. A sent link is not a submitted claim.`);
     openTask(m, ctx, m.get('cases', c.id)!, { kind: 'Claim', step: 'Check that the claim was submitted', why: 'Invitation sent; submission not yet recorded', trigger: `Claim event ${e.id}`, dueDate: addWorkingDays(ctx.today, 3), status: 'Waiting' });
@@ -517,7 +570,7 @@ export const commands: Record<string, Command> = {
     const c = getCase(m, p.caseId);
     if (c.claimStatus !== 'Invited') throw rule('Record a submission after the invitation was sent.');
     const reqId = req(p.claimRequestId, 'Claim request ID');
-    const inv = m.familyItems('claimEvents', c.id).filter(e => e.type === 'Invited').pop();
+    const inv = notUndone(m.familyItems('claimEvents', c.id)).filter(e => e.type === 'Invited').pop();
     const e = m.insert('claimEvents', { id: m.nextId('CE', 4), caseId: c.id, type: 'Submitted', date: clean(p.submittedAt) || ctx.now, profileId: inv?.profileId ?? null, claimRequestId: reqId, recipient: clean(p.claimant) || inv?.recipient || null, reviewerId: null, notes: clean(p.notes), evidence: clean(p.evidence), actorId: ctx.userId, source: 'User' });
     m.update('cases', c.id, { claimStatus: 'Submitted' });
     audit(m, ctx, { caseId: c.id, entity: 'ClaimEvent', entityId: e.id, action: 'Claim submission recorded', field: 'claimStatus', from: 'Invited', to: 'Submitted', reason: `Request ${reqId}` });
@@ -532,7 +585,7 @@ export const commands: Record<string, Command> = {
     if (c.claimStatus !== 'Submitted') throw rule('Only a submitted claim can go to review.');
     const reviewer = req(p.reviewerId, 'Reviewer');
     if (!can(m, reviewer, 'reviewClaim')) throw rule('Pick a reviewer who can approve claims.');
-    const sub = m.familyItems('claimEvents', c.id).filter(e => e.type === 'Submitted').pop();
+    const sub = notUndone(m.familyItems('claimEvents', c.id)).filter(e => e.type === 'Submitted').pop();
     const e = m.insert('claimEvents', { id: m.nextId('CE', 4), caseId: c.id, type: 'Sent to Review', date: ctx.now, profileId: sub?.profileId ?? null, claimRequestId: sub?.claimRequestId ?? null, recipient: null, reviewerId: reviewer, notes: clean(p.notes), evidence: '', actorId: ctx.userId, source: 'User' });
     m.update('cases', c.id, { claimStatus: 'In Review' });
     audit(m, ctx, { caseId: c.id, entity: 'ClaimEvent', entityId: e.id, action: 'Claim sent to review', field: 'claimStatus', from: 'Submitted', to: 'In Review', reason: `Reviewer ${userName(m, reviewer)}` });
@@ -547,7 +600,7 @@ export const commands: Record<string, Command> = {
     if (c.claimStatus !== 'In Review') throw rule('The claim is not in review.');
     const decision = oneOf(p.decision, ['Approve', 'Reject', 'Request Clarification'] as const, 'decision');
     const notes = req(p.notes, 'What was checked');
-    const sub = m.familyItems('claimEvents', c.id).filter(e => e.type === 'Submitted').pop();
+    const sub = notUndone(m.familyItems('claimEvents', c.id)).filter(e => e.type === 'Submitted').pop();
     const type = decision === 'Approve' ? 'Approved' : decision === 'Reject' ? 'Rejected' : 'Clarification Requested';
     const e = m.insert('claimEvents', { id: m.nextId('CE', 4), caseId: c.id, type, date: ctx.now, profileId: sub?.profileId ?? null, claimRequestId: sub?.claimRequestId ?? null, recipient: null, reviewerId: ctx.userId, notes, evidence: clean(p.evidence), actorId: ctx.userId, source: 'User' });
     closeTasks(m, ctx, c.id, ['Claim Review'], `Review: ${type}`);
@@ -577,7 +630,7 @@ export const commands: Record<string, Command> = {
     if (c.claimStatus !== 'Approved') throw rule('Cannot mark Claim Completed: the claim must be approved first, then verified in the backend.');
     const outcome = oneOf(p.outcome, ['Verified', 'Access unavailable'] as const, 'outcome');
     const ref = req(p.backendRef, 'Backend reference');
-    const sub = m.familyItems('claimEvents', c.id).filter(e => e.type === 'Submitted').pop();
+    const sub = notUndone(m.familyItems('claimEvents', c.id)).filter(e => e.type === 'Submitted').pop();
     if (outcome === 'Access unavailable') {
       const e = m.insert('claimEvents', { id: m.nextId('CE', 4), caseId: c.id, type: 'Backend Mismatch', date: ctx.now, profileId: sub?.profileId ?? null, claimRequestId: sub?.claimRequestId ?? null, recipient: null, reviewerId: ctx.userId, notes: clean(p.notes), evidence: ref, actorId: ctx.userId, source: 'User' });
       audit(m, ctx, { caseId: c.id, entity: 'ClaimEvent', entityId: e.id, action: 'Backend mismatch', reason: 'Claim approved but backend access is unavailable', evidence: ref });
@@ -603,8 +656,9 @@ export const commands: Record<string, Command> = {
     if (!['Claimed', 'Activation Pending'].includes(c.lifecycleStage)) throw rule(`Not at activation (now ${c.lifecycleStage}).`);
     const evidence = req(p.evidence, 'How access was verified');
     const e = m.insert('activationEvents', { id: m.nextId('AE', 4), caseId: c.id, type: 'Access Verified', date: ctx.now, feature: null, expectedOutcome: null, operatorId: ctx.userId, agreedDate: null, backendRef: clean(p.backendRef) || null, evidence, result: null, actorId: ctx.userId });
+    const before = c.activationStatus;   // read before the update changes c
     m.update('cases', c.id, { activationStatus: 'Access Verified' });
-    audit(m, ctx, { caseId: c.id, entity: 'ActivationEvent', entityId: e.id, action: 'Access verified', field: 'activationStatus', from: c.activationStatus, to: 'Access Verified', evidence });
+    audit(m, ctx, { caseId: c.id, entity: 'ActivationEvent', entityId: e.id, action: 'Access verified', field: 'activationStatus', from: before, to: 'Access Verified', evidence });
     closeTasks(m, ctx, c.id, ['Activation'], 'Access verified');
     setStage(m, ctx, c, 'Activation Pending', 'Access verified. Meaningful first use still needed.');
     openTask(m, ctx, m.get('cases', c.id)!, { kind: 'Activation', step: 'Choose one useful feature with the artist', why: 'Access alone is not activation', trigger: `Activation event ${e.id}` });
@@ -617,7 +671,9 @@ export const commands: Record<string, Command> = {
     const feature = oneOf(p.feature, FEATURES, 'feature');
     const agreed = req(p.agreedDate, 'Agreed date');
     const e = m.insert('activationEvents', { id: m.nextId('AE', 4), caseId: c.id, type: 'Feature Selected', date: ctx.now, feature, expectedOutcome: clean(p.expectedOutcome), operatorId: p.operatorId || ctx.userId, agreedDate: agreed, backendRef: null, evidence: '', result: null, actorId: ctx.userId });
+    const before = c.activationStatus;
     m.update('cases', c.id, { activationStatus: 'Feature Selected' });
+    audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Activation status changed', field: 'activationStatus', from: before, to: 'Feature Selected', reason: `Feature ${feature}` });
     audit(m, ctx, { caseId: c.id, entity: 'ActivationEvent', entityId: e.id, action: 'Feature selected', to: feature, reason: clean(p.expectedOutcome) || null, next: `Guide on ${agreed}` });
     closeTasks(m, ctx, c.id, ['Activation'], `Feature chosen: ${feature}`);
     openTask(m, ctx, m.get('cases', c.id)!, { kind: 'Activation', step: `Guide the artist: ${feature}`, why: clean(p.expectedOutcome) || 'First meaningful use', trigger: `Activation event ${e.id}`, dueDate: agreed, ownerId: p.operatorId || c.ownerId });
@@ -635,10 +691,11 @@ export const commands: Record<string, Command> = {
     if (!['Access Verified', 'Feature Selected'].includes(c.activationStatus)) throw rule('Verify access before recording meaningful use.');
     const ref = clean(p.backendRef), evidence = clean(p.evidence);
     if (!ref && !evidence) throw rule('Meaningful use needs a backend event reference or verified evidence.');
-    const feat = m.familyItems('activationEvents', c.id).filter(e => e.type === 'Feature Selected').pop();
+    const feat = notUndone(m.familyItems('activationEvents', c.id)).filter(e => e.type === 'Feature Selected').pop();
     const e = m.insert('activationEvents', { id: m.nextId('AE', 4), caseId: c.id, type: 'Meaningful Use', date: clean(p.timestamp) || ctx.now, feature: clean(p.feature) || feat?.feature || null, expectedOutcome: feat?.expectedOutcome ?? null, operatorId: ctx.userId, agreedDate: null, backendRef: ref || null, evidence, result: 'Verified', actorId: ctx.userId });
+    const before = c.activationStatus;
     m.update('cases', c.id, { activationStatus: 'Activated' });
-    audit(m, ctx, { caseId: c.id, entity: 'ActivationEvent', entityId: e.id, action: 'Meaningful first use recorded', field: 'activationStatus', from: c.activationStatus, to: 'Activated', evidence: [ref, evidence].filter(Boolean).join(' · ') });
+    audit(m, ctx, { caseId: c.id, entity: 'ActivationEvent', entityId: e.id, action: 'Meaningful first use recorded', field: 'activationStatus', from: before, to: 'Activated', evidence: [ref, evidence].filter(Boolean).join(' · ') });
     closeTasks(m, ctx, c.id, ['Activation'], 'Meaningful first use verified');
     setStage(m, ctx, c, 'Activated', `${e.feature ?? 'Feature'} used (${ref || evidence})`, ref || evidence);
     openTask(m, ctx, m.get('cases', c.id)!, { kind: 'ARM', step: 'Hand over to ARM', why: 'Activated artists move to ongoing relationship management', trigger: `Activation event ${e.id}` });
@@ -651,7 +708,9 @@ export const commands: Record<string, Command> = {
     const next = clean(p.nextParticipationCheck) || addDays(ctx.today, PARTICIPATION_CHECK_DAYS);
     const arm = { relationshipOwnerId: ownerId, interests: clean(p.interests), language: clean(p.language) || c.language || '', supportNeeds: clean(p.supportNeeds), nextParticipationCheck: next, since: ctx.now };
     const e = m.insert('activationEvents', { id: m.nextId('AE', 4), caseId: c.id, type: 'ARM Handover', date: ctx.now, feature: null, expectedOutcome: arm.interests, operatorId: ownerId, agreedDate: next, backendRef: null, evidence: arm.supportNeeds, result: null, actorId: ctx.userId });
+    const armBefore = c.arm;
     m.update('cases', c.id, { arm });
+    audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'ARM record changed', field: 'arm', from: JSON.stringify(armBefore ?? null), to: JSON.stringify(arm) });
     audit(m, ctx, { caseId: c.id, entity: 'ActivationEvent', entityId: e.id, action: 'Handed over to ARM', to: userName(m, ownerId), reason: `Interests: ${arm.interests || '—'}; support: ${arm.supportNeeds || '—'}`, next: `Participation check ${next}` });
     closeTasks(m, ctx, c.id, ['ARM'], 'Handed over to ARM');
     setStage(m, ctx, c, 'Ongoing ARM', `Relationship owner ${userName(m, ownerId)}; next check ${next}`);
@@ -668,7 +727,9 @@ export const commands: Record<string, Command> = {
     const cc = m.get('cases', c.id)!;
     if (active) {
       const next = addDays(ctx.today, PARTICIPATION_CHECK_DAYS);
-      m.update('cases', c.id, { arm: { ...cc.arm!, nextParticipationCheck: next } });
+      const armBefore = cc.arm, armAfter = { ...cc.arm!, nextParticipationCheck: next };
+      m.update('cases', c.id, { arm: armAfter });
+      audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'ARM record changed', field: 'arm', from: JSON.stringify(armBefore ?? null), to: JSON.stringify(armAfter) });
       openTask(m, ctx, cc, { kind: 'ARM', step: '30-day participation check', why: 'Continued participation', trigger: `Activation event ${e.id}`, dueDate: next, ownerId: cc.arm?.relationshipOwnerId, status: 'Waiting' });
       return { message: `Still active. Next check ${next}.`, caseId: c.id };
     }
@@ -798,6 +859,49 @@ export const commands: Record<string, Command> = {
     syncArtistStatus(m, ctx, c.id, reason);
     return { message: `${c.canonicalName} rejected. The record and its history are kept.`, caseId: c.id };
   },
+  /**
+   * The artist has passed away (public records, checked by Find artist): a person decides. Continue = the search runs as
+   * usual (the decision is kept); remove = the artist is rejected with the reason, and the next artist by songs takes the
+   * free place in the top 250.
+   */
+  decideLife(m, ctx, p) {
+    const c = getCase(m, p.caseId);
+    const life = c.life;
+    if (!life || life.status !== 'Deceased') throw rule(`Nothing to decide: no date of death is on record for ${c.canonicalName}.`);
+    const note = clean(p.note);
+    const decided = { decidedBy: ctx.userId, decidedAt: ctx.now };
+    if (p.decision === 'continue') {
+      m.update('cases', c.id, { life: { ...life, decision: 'Proceed', ...decided }, updatedAt: ctx.now });
+      audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Passed away: continue anyway', field: 'life', from: life.decision, to: 'Proceed', reason: note || 'Continue with the artist (for example through the family or the estate)' });
+      syncDiscoveryState(m, ctx, c.id);
+      // paused before searching → search now; searched before the check existed → carry on with what was found
+      const searched = c.verifiedProfileCount > 0 || m.byCase('discoveryJobs', c.id).some(j => j.status === 'COMPLETED' || j.status === 'NEEDS_REVIEW');
+      let started = searched ? 'Carry on with what the search found.' : '';
+      if (!searched) try { started = discoveryCommands.startDiscovery(m, ctx, { caseId: c.id, mode: 'full' }).message; } catch (e) { started = `Find artist did not start: ${(e as Error).message}`; }
+      return { message: `Continuing with ${c.canonicalName}. ${started}`, caseId: c.id };
+    }
+    if (p.decision === 'remove') {
+      const before = new Set(topArtistIds(m));
+      commands.rejectArtist(m, ctx, { caseId: c.id, reason: `Passed away (${diedText(life)})${note ? `: ${note}` : ''}` });
+      m.update('cases', c.id, { life: { ...life, decision: 'Removed', ...decided } });
+      syncDiscoveryState(m, ctx, c.id);
+      const joined = topArtistIds(m).filter(id => !before.has(id)).map(id => m.get('cases', id)?.canonicalName).filter(Boolean);
+      return { message: `${c.canonicalName} removed (passed away). ${joined.length ? `${joined.join(', ')} joins the top ${TOP_ARTISTS} in the free place.` : ''} Restore the artist any time from Artists → Rejected.`.trim(), caseId: c.id };
+    }
+    throw rule('Pick continue or remove.');
+  },
+  /** Artist or label (a person decides; labels have their own list and are never in the artist top 250). */
+  setKind(m, ctx, p) {
+    const c = getCase(m, p.caseId);
+    const kind = oneOf(p.kind, ['Artist', 'Label'] as const, 'type (artist or label)');
+    if (c.kind === kind) return { message: `${c.canonicalName} is already ${kind === 'Label' ? 'a label' : 'an artist'}.`, caseId: c.id };
+    // a label set aside earlier as "not a person" comes back as a label
+    const setAside = kind === 'Label' && !!c.rejectedAt && /label or company|not an individual/i.test(c.rejectedReason ?? '');
+    m.update('cases', c.id, { kind, ...(setAside ? { rejectedAt: null, rejectedReason: null } : {}), updatedAt: ctx.now });
+    audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Artist type changed', field: 'kind', from: c.kind, to: kind, reason: clean(p.reason) || (kind === 'Label' ? 'A label or company, not a person' : 'A person, not a label') });
+    syncArtistStatus(m, ctx, c.id, kind === 'Label' ? 'Marked as a label' : 'Marked as an artist');
+    return { message: kind === 'Label' ? `${c.canonicalName} moved to Labels (Artists → Who → Labels).` : `${c.canonicalName} is an artist again (ranked by songs with the other artists).`, caseId: c.id };
+  },
   restoreArtist(m, ctx, p) {
     const c = getCase(m, p.caseId);
     if (!c.rejectedAt) throw rule('This artist is not rejected.');
@@ -863,3 +967,5 @@ export { evidenceChanged };
 
 // Discovery commands share the same registry, validation, transactions and audit trail.
 Object.assign(commands, discoveryCommands);
+Object.assign(commands, messageCommandsWith(commands));
+Object.assign(commands, undoCommands);

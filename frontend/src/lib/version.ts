@@ -1,7 +1,61 @@
 // The app version (shown in the footer) and a one-line summary of each change, shown once after an update.
-export const VERSION = 'V2.3.1';
+export const VERSION = 'V2.7.2';
 
 export const CHANGES: Record<string, string[]> = {
+  'V2.7.2': [
+    'Verified Artists → Download Excel: every verified artist in the artist directory’s layout, with “Social link” split into one column per platform (Instagram, Facebook, X, YouTube, Spotify …) and today’s song count. The file can be imported again.',
+    'Imports: the artist directory (Excel, one sheet per letter pair) is now read in full: song titles become songs, the song count ranks the artist, social links become profiles to verify (with their confidence), Verified = Yes means on Goongoonalo, Core member gets a badge, deceased names ask “continue or remove?”.',
+    'Labels and companies (“… Pvt. Ltd.”, “… Records”, “… Music”) have their own list: Artists → Who → Labels. They never take a place in the artist top 250. On any artist page, “Artist · change” switches between artist and label. Placeholder credits (“Traditional”, “Instrumental”) are set aside under Rejected.',
+    'Artists: one row of buttons for what to see: Top 250 by songs, All by songs, A → Z, Z → A.',
+    'Artists now lists only artists not started yet. Click Find artist and the artist moves to Verified Artists → “In progress” (searching, to review), then to “Verified”. A search in Artists still finds everyone.',
+    'Find artist first checks whether the artist is alive (public records). If the artist has passed away, the search stops before using any search quota and the artist page asks: “Continue anyway” or “Remove artist”.',
+    'Removing an artist (passed away, or rejected for another reason) frees their place: the next artist by songs (#251, then #252…) joins the top 250. Removed artists stay under Artists → Rejected and can be restored.',
+    'Each route and “Copy & open” button shows the app’s logo (Instagram, X, Facebook; people icon for a go-between), so it is clear which app the message goes through.',
+    'Messages: each step has two lists, “Pending: not sent yet” and “Sent” (with the answer so far). The same in Status: see whom the message went to and who is still pending.',
+    'Festival greetings: members who have not said yes are listed under the greeting list with “They said yes” / “They said no”. Greetings can go out any day, not only on the festival.',
+  ],
+  'V2.7.1': [
+    'New “Status” page (left menu): every artist’s step at a glance, e.g. “Step 4 of 5 · Waiting for reply”. Tabs: Claims, On Goongoonalo, Greetings, Stopped. Click an artist to continue with the next step; filters and Download CSV.',
+    'Add a profile by hand (Profiles or Evidence → “Add profile by hand”): pick the platform, paste the link. Only real profile links of that platform are accepted, so no other link can be saved. It can replace a wrong verified profile.',
+    'Better Instagram matches: the same handle as the artist’s X or Facebook now counts (e.g. @singer_shaan), label or company pages count less, and the search adds the artist’s role (“singer”) like a person would.',
+    'After “Copy & open”, the steps in the chat are shown: click the message box, Ctrl+V pastes, Enter sends.',
+  ],
+  'V2.7.0': [
+    'Claims and Routes are now one tab, “Claims & routes”, in five steps: 1 Is the artist on Goongoonalo? 2 The route (how we reach them) 3 The first message 4 Their answer 5 The claim (only for artists not on Goongoonalo).',
+    'The route: one click turns the artist’s own verified Instagram, X or Facebook profile into the route; or add someone who can pass the message on. Members get member messages and festival greetings through it, the others the claim invitation.',
+    '“Undo last step” and “Reset the whole process” sit at the top of the tab. They now also work after activation has started (activation steps are taken back first).',
+    'Your profile menu (top right) shows your first name; open it for your role, email, the theme (light, dark or system) and Settings.',
+    'Settings moved from the bottom-left corner into the profile menu. Settings → Display: five text sizes, remembered by this browser.',
+    'A message that could not be delivered marks its route as not working, so nobody tries it again.',
+  ],
+  'V2.6.0': [
+    'Claims are only for artists not on Goongoonalo. The Claims tab first asks “Is the artist on Goongoonalo?”; “No, not yet” starts the claim with the join invitation in one click.',
+    'Routes and Claims are guided steps: the next step is highlighted, with its button. “Not interested” shows that contact has ended and offers to undo it.',
+    'Every step can be undone (“Undo last step”), and a whole process reset after typing RESET. Undone steps stay in the history, marked.',
+    'Messages → Send: a “Sent” list shows each message you mark as sent, newest first.',
+    'Writing a message: the rules of {name}, {song}, {songs}, {festival} and {sender}, a sample to start from, a sender name (e.g. Team Goongoonalo) and a live preview. Wrong words in braces are caught before saving.',
+    'New dropdowns everywhere: clear list, the choice ticked, short explanations, keyboard friendly.',
+    'Pop-ups open in the middle of the screen and use most of it; text is larger on bigger screens.',
+    'Fixed: the history now records the correct earlier value for contact preference, claim status and tasks.',
+  ],
+  'V2.5.0': [
+    'New Messages page: message verified artists on their own Instagram, X or Facebook. The app writes the message and opens the chat; you paste it and press Send.',
+    'First question for every artist: is the artist on Goongoonalo? Yes → member message and festival greetings; No → join invitation, then the claim.',
+    'Three ready messages (join invitation, member message, follow-up) plus festival greetings in English and Hindi; add and edit your own in Messages → Templates.',
+    'Follow-ups 3, 7 and 14 days after the first message (at most 3). Any answer stops them. Each message is recorded as a contact attempt.',
+    'Limits keep accounts safe: messages per day for each platform and seconds between messages (Messages → Limits).',
+    '“Not interested” and “Do not disturb” opt the artist out; Verified Artists shows it, and nobody can message them again.',
+    'Festival calendar with regional festivals; greetings only for members who said yes, with “Reply STOP” to stop them.',
+    'Routes: a Delete button removes a route (the timeline keeps a note of it).',
+  ],
+  'V2.4.0': [
+    'Artists opens on the top 250 artists: most songs released first; with equal songs, more followers first. “Continue” at the end goes on with the rest.',
+    'Artists filters are now tidy dropdowns: Show (Top 250 or All), Order (Top first, A → Z, Z → A), Status and Who.',
+    'Record contact → “Direct”: message the artist on a verified profile without adding a route first.',
+    'Claims: click any of the six steps to see what it means, why it is needed and what happened at that step.',
+    'Verified Artists: a Claim column opens the claim steps of that artist.',
+    'The app starts more reliably on a slow connection to the database.',
+  ],
   'V2.3.1': [
     'Search ignores capitals, spaces, dots and dashes, finds words in any order, and shows the best match first.',
     'Two-step sign-in: Settings → Two-step sign-in, with an authenticator app and one-time recovery codes.',

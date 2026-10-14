@@ -1,9 +1,9 @@
 // Evidence graph: artists, songs, releases, labels, distributors, profiles, contacts and routes, with one edge per
 // relationship. Every edge keeps its source, evidence and status (verified by a person / discovered with a source / possible).
 // Keys are deterministic, so a repeated import or a repeated search never creates a duplicate edge.
-import { contactLabel, type DiscoveryStrength, type EdgeStatus, type GraphNodeType, type RelationshipType } from './constants';
+import { DERIVED_EDGE_TYPES, contactLabel, type DiscoveryStrength, type EdgeStatus, type GraphNodeType, type RelationshipType } from './constants';
 import type { Model } from './model';
-import type { ArtistProfile, ConnectionPath, Ctx, GraphEdge, GraphNode, PathStep } from './types';
+import type { ArtistProfile, ConnectionPath, Contact, Ctx, GraphEdge, GraphNode, PathStep } from './types';
 import { daysBetween, nameKey } from './util';
 
 export const nid = {
@@ -32,6 +32,8 @@ export interface EdgeInput {
   sourceId: string; targetId: string; type: RelationshipType; label: string; evidence: string; source: string;
   sourceUrl?: string | null; sourceType: GraphEdge['sourceType']; status: EdgeStatus; confidence?: number; active?: boolean;
 }
+/** Catalogue edges are not stored, so they take ids from a counter of this process instead of the stored sequence. */
+let derivedSeq = 0;
 /** Insert or update one relationship. Status only moves up (possible → discovered → verified) unless `force` is set. */
 export function upsertEdge(m: Model, ctx: Ctx, e: EdgeInput, force = false): { edge: GraphEdge; created: boolean } {
   const key = `${e.type}|${e.sourceId}|${e.targetId}|${e.label}`;
@@ -39,7 +41,7 @@ export function upsertEdge(m: Model, ctx: Ctx, e: EdgeInput, force = false): { e
   const cur = id ? m.get('graphEdges', id) : undefined;
   if (!cur) {
     const edge = m.insert('graphEdges', {
-      id: m.nextId('GE', 6), key, sourceId: e.sourceId, targetId: e.targetId, type: e.type, label: e.label, evidence: e.evidence, source: e.source, sourceUrl: e.sourceUrl ?? null,
+      id: DERIVED_EDGE_TYPES.includes(e.type) ? `GD${++derivedSeq}` : m.nextId('GE', 6), key, sourceId: e.sourceId, targetId: e.targetId, type: e.type, label: e.label, evidence: e.evidence, source: e.source, sourceUrl: e.sourceUrl ?? null,
       sourceType: e.sourceType, status: e.status, active: e.active ?? true, confidence: e.confidence ?? 60, discoveredAt: ctx.now,
       verifiedAt: e.status === 'verified' ? ctx.now : null, verifiedBy: e.status === 'verified' ? ctx.userId : null,
     });
@@ -62,10 +64,30 @@ const creditType = (role: string, hasCase: boolean): RelationshipType => {
   return 'PERSON_CREDITED_ON_SONG';
 };
 
-/** Catalogue relationships of one song (called by imports and manual song/credit edits). */
+/**
+ * The catalogue graph is kept for the top artists only, with their closest connections: their songs, the people credited
+ * on those songs, and the label and distributor. Other songs are not in the graph. No scope = every song (seeded tests).
+ */
+const scopes = new WeakMap<Model, Set<string>>();
+export function inGraphScope(m: Model, caseId: string): boolean { const s = scopes.get(m); return !s || s.has(m.canonical(caseId)); }
+/** Set the artists the graph is kept for; the songs of artists who just entered are added (closest connections). */
+export function setGraphScope(m: Model, ctx: Ctx, caseIds: Iterable<string>) {
+  const prev = scopes.get(m);
+  const next = new Set([...caseIds].map(id => m.canonical(id)));
+  scopes.set(m, next);
+  const tracks = new Set<string>();
+  for (const id of next) if (!prev?.has(id)) for (const tid of m.trackIdsOfCase(id)) tracks.add(tid);
+  for (const tid of tracks) syncTrackGraph(m, ctx, tid);
+  // Contact owners (people, labels) are not stored either: put their nodes back.
+  if (!prev) for (const k of m.data.contacts.values()) { const o = contactOwner(m, k); ensureNode(m, ctx, o.id, o.type, o.label, o.refId, o.sub); }
+}
+
+/** Catalogue relationships of one song (imports and manual song/credit edits), for songs of artists in the graph scope. */
 export function syncTrackGraph(m: Model, ctx: Ctx, trackId: string) {
   const t = m.get('tracks', trackId);
   if (!t) return;
+  const scope = scopes.get(m);
+  if (scope && !m.creditsOfTrack(t.id).some(cr => cr.caseId && scope.has(m.canonical(cr.caseId)))) return;
   const song = nid.song(t.id);
   const src = t.lastBatchId === 'Manual' ? 'Added by hand' : `Backend export ${t.lastBatchId}`;
   const sourceType: GraphEdge['sourceType'] = t.source === 'Manual' ? 'Manual' : 'Backend export';
@@ -78,13 +100,7 @@ export function syncTrackGraph(m: Model, ctx: Ctx, trackId: string) {
     ensureNode(m, ctx, nid.dist(t.distributor), 'Distributor', t.distributor, null, 'Distributor');
     upsertEdge(m, ctx, { sourceId: song, targetId: nid.dist(t.distributor), type: 'SONG_DISTRIBUTED_BY', label: 'Distributed by', evidence: `“${t.title}” is distributed by ${t.distributor} (${src})`, source: src, sourceType, status: 'discovered', confidence: 90 });
   }
-  if (t.releaseId) {
-    const rel = m.get('releases', t.releaseId);
-    if (rel) {
-      ensureNode(m, ctx, nid.release(rel.id), 'Release', rel.title, rel.id, rel.backendReleaseId);
-      upsertEdge(m, ctx, { sourceId: song, targetId: nid.release(rel.id), type: 'SONG_ON_RELEASE', label: 'On release', evidence: `“${t.title}” is on ${rel.title} (${rel.backendReleaseId})`, source: src, sourceType, status: 'discovered', confidence: 90 });
-    }
-  }
+  // Albums (releases) are not in the graph: no screen shows them and they are no way to reach an artist.
   for (const cr of m.creditsOfTrack(t.id)) {
     const caseId = cr.caseId ? m.canonical(cr.caseId) : null;
     const c = caseId ? m.get('cases', caseId) : null;
@@ -97,16 +113,22 @@ export function syncTrackGraph(m: Model, ctx: Ctx, trackId: string) {
   }
 }
 
+/** The person or organisation a contact belongs to, as a graph node. */
+function contactOwner(m: Model, k: Contact): { id: string; type: GraphNodeType; label: string; refId: string | null; sub: string | null } {
+  const caseId = k.caseId ? m.canonical(k.caseId) : null;
+  if (k.organisation) return { id: nid.label(k.organisation), type: k.role === 'Distributor' ? 'Distributor' : 'Label', label: k.organisation, refId: null, sub: k.role };
+  return { id: caseId ? nid.case(caseId) : nid.person(k.personName), type: caseId ? 'Artist' : 'Person', label: caseId ? m.get('cases', caseId)!.canonicalName : k.personName, refId: caseId, sub: null };
+}
+
 /** A contact in the directory: person (or organisation) → contact. Verified contacts become verified edges. */
 export function syncContactGraph(m: Model, ctx: Ctx, contactId: string) {
   const k = m.get('contacts', contactId);
   if (!k) return;
   const node = nid.contact(k.id);
   ensureNode(m, ctx, node, 'Contact', contactLabel(k.verified, k.channel), k.id, k.personName);
-  const caseId = k.caseId ? m.canonical(k.caseId) : null;
-  const owner = k.organisation ? nid.label(k.organisation) : caseId ? nid.case(caseId) : nid.person(k.personName);
-  if (k.organisation) ensureNode(m, ctx, owner, k.role === 'Distributor' ? 'Distributor' : 'Label', k.organisation, null, k.role);
-  else ensureNode(m, ctx, owner, caseId ? 'Artist' : 'Person', caseId ? m.get('cases', caseId)!.canonicalName : k.personName, caseId, null);
+  const o = contactOwner(m, k);
+  const owner = o.id;
+  ensureNode(m, ctx, o.id, o.type, o.label, o.refId, o.sub);
   upsertEdge(m, ctx, {
     sourceId: owner, targetId: node, type: k.organisation ? 'ORGANISATION_HAS_CONTACT' : 'PERSON_HAS_CONTACT', label: k.verified ? 'Verified contact' : 'Contact',
     evidence: `${k.personName}: ${k.channel} contact${k.verified ? ` verified${k.verifiedAt ? ` on ${k.verifiedAt.slice(0, 10)}` : ''}` : ' (not verified yet)'}${k.authorityEvidence ? `. Source: ${k.authorityEvidence}` : ''}`,
@@ -141,6 +163,8 @@ export function syncRouteGraph(m: Model, ctx: Ctx, routeId: string) {
   if (!r) return;
   const node = nid.route(r.id);
   ensureNode(m, ctx, node, 'Route', `Route ${r.id}`, r.id, r.state);
+  // A deleted route leaves the graph: its connections are switched off (kept for the history).
+  if (r.state === 'Deleted') { for (const e of m.edgesOf(node)) if (e.active) m.update('graphEdges', e.id, { active: false }); return; }
   const status: EdgeStatus = r.state === 'Rejected' || r.state === 'Exhausted' ? 'rejected' : r.state === 'Candidate' ? 'possible' : 'verified';
   const target = m.canonical(r.targetCaseId);
   upsertEdge(m, ctx, { sourceId: node, targetId: nid.case(target), type: 'ROUTE_CONNECTS_ARTIST', label: `Route (${r.state})`, evidence: r.evidence, source: r.origin, sourceType: 'Route', status, confidence: r.confidence, active: true }, true);
@@ -152,7 +176,8 @@ export interface ViewNode { id: string; type: GraphNodeType; label: string; sub:
 export interface ViewEdge { id: string; source: string; target: string; type: RelationshipType; label: string; status: EdgeStatus; evidence: string; sourceLabel: string; sourceUrl: string | null; sourceType: string; discoveredAt: string; verifiedAt: string | null; verifiedBy: string | null; confidence: number; derived?: boolean }
 export interface GraphView { root: string; nodes: ViewNode[]; edges: ViewEdge[]; hidden: { songs: number } }
 
-export function caseGraph(m: Model, caseId: string, opts: { depth?: number; expand?: string[]; pathId?: string; maxSongs?: number } = {}): GraphView {
+/** The artist and their closest connections: songs, people credited with them, label, distributor, profiles, contacts, routes. */
+export function caseGraph(m: Model, caseId: string, opts: { expand?: string[]; pathId?: string; maxSongs?: number } = {}): GraphView {
   const rootCase = m.canonical(caseId);
   const root = nid.case(rootCase);
   const fam = new Set(m.family(rootCase).map(id => nid.case(id)));
@@ -218,13 +243,6 @@ export function caseGraph(m: Model, caseId: string, opts: { depth?: number; expa
     for (const e of m.edgesOf(p.id).filter(visible)) {
       if ((e.type === 'ARTIST_HAS_PROFILE' || e.type === 'PERSON_HAS_PROFILE') && e.status === 'verified' && nodeView(e.targetId, 3)) edgeView(e);
       if (e.type === 'PERSON_HAS_CONTACT' && nodeView(e.targetId, 3)) edgeView(e);
-    }
-  }
-  // Depth 2: each collaborator's other songs (a few) and the people on them
-  if ((opts.depth ?? 1) >= 2) {
-    for (const p of collaborators) {
-      const other = m.edgesOf(p.id).filter(e => isCredit(e.type) && e.sourceId === p.id && visible(e) && !nodes.has(e.targetId)).slice(0, 4);
-      for (const e of other) { if (nodeView(e.targetId, 3)) edgeView(e); for (const e2 of m.edgesOf(e.targetId).filter(x => isCredit(x.type) && visible(x) && x.sourceId !== p.id).slice(0, 3)) if (nodeView(e2.sourceId, 4)) edgeView(e2); }
     }
   }
   // Manual expansion: direct neighbours of the chosen nodes (capped)

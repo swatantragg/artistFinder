@@ -1,6 +1,9 @@
 // One entry point for every read and write. The API server wraps it with the PostgreSQL store (Prisma), so business rules
 // exist exactly once. Discovery jobs run in the background on the same engine.
 import { commands, type CommandResult } from './commands';
+import { setGraphScope } from './graph';
+import { keepOnlyVerified } from './prune';
+import { topArtistIds } from './views';
 import { offProviderSet, type ProviderSet } from './discovery/providers';
 import { DEFAULT_RUNNER, DiscoveryRunner, type DiscoveryHost, type RunnerOptions } from './discovery/runner';
 import { searchBudget, usageOf } from './discovery/budget';
@@ -10,7 +13,7 @@ import { decodeText, parseDelimited } from './importmap';
 import { staleDaysOf } from './discovery/views';
 import { afterCommand, sweepStale } from './status';
 import { Model, type Dirty, type Snapshot } from './model';
-import { RuleError, audit } from './ops';
+import { RuleError, audit, can } from './ops';
 import { queries, type QueryName } from './queries';
 import { upgradeWorkspace } from './upgrade';
 import { emptyModel } from './workspace';
@@ -98,7 +101,10 @@ export class Engine {
     const snap = await this.store.load();
     if (snap && (snap.cases?.length || snap.batches?.length || snap.meta?.some(x => x.id === 'workspace'))) {
       this.m.load(snap);
+      // The catalogue part of the graph is not stored: rebuild it for the top artists (closest connections only).
+      this.applyGraphScope();
       const upgraded = upgradeWorkspace(this.m, this.ctx(ENGINE_USER));
+      if (upgraded.length) this.applyGraphScope();   // an upgrade can change who the top artists are
       if (upgraded.length) { await this.store.save(this.m.takeDirty()); console.log(`Workspace upgraded: ${upgraded.join('; ')}`); }
       const interrupted = this.m.all('discoveryJobs').filter(j => j.status === 'SEARCHING' || j.status === 'PROCESSING');
       if (interrupted.length) {
@@ -148,6 +154,8 @@ export class Engine {
         const res = fn(this.m, ctx, params);
         // Whatever the command did, the artist's identity status follows (e.g. a completed claim verifies the artist).
         afterCommand(this.m, ctx, name, res?.caseId, ENGINE_USER);
+        // rejecting or restoring an artist changes the top artists: the one who moves up gets their graph
+        if (name === 'rejectArtist' || name === 'restoreArtist' || name === 'decideLife' || name === 'setKind') this.applyGraphScope();
         await this.store.save(this.m.takeDirty());
         this.m.commit();
         return res;
@@ -172,6 +180,7 @@ export class Engine {
         const batch = await processImport(this.m, this.ctx(userId), imp, onStep, onProgress);
         await this.store.save(this.m.takeDirty());
         this.m.commit();
+        this.applyGraphScope();   // new songs can change who the top artists are
         return batch;
       } catch (e) {
         this.m.rollback();
@@ -244,6 +253,26 @@ export class Engine {
     });
   }
 
+  /**
+   * Keep only the verified artists and everything that is theirs; remove every other artist, song, import and the history
+   * that belongs to them (prune.ts). People, accounts, templates and settings stay. Owner only; take a backup first.
+   */
+  keepOnlyVerified(userId: string | undefined): Promise<{ kept: number; before: Record<string, number>; after: Record<string, number> }> {
+    return this.serial(async () => {
+      if (!userId || !can(this.m, userId, 'resetWorkspace')) throw new RuleError('Only the System Owner can delete data.');
+      this.runner.stop();
+      const res = keepOnlyVerified(this.m);
+      const m = new Model();
+      m.load(res.snap);
+      m.takeDirty();
+      await this.store.replace(m.storedSnapshot());
+      this.m = m;
+      this.applyGraphScope();
+      this.runner = this.makeRunner();
+      return { kept: res.kept.length, before: res.before, after: res.after };
+    }).then(r => { this.runner.kick(); return r; });
+  }
+
   /** Start again with an empty workspace (all data is deleted; signed-up people stay). 'seed' loads the test fixtures. */
   reset(kind: 'empty' | 'seed' = 'empty'): Promise<{ cases: number }> {
     return this.serial(async () => {
@@ -251,12 +280,19 @@ export class Engine {
       this.runner.stop();
       const m = kind === 'seed' ? await this.opts.seed!() : emptyModel(this.m.all('users'));
       m.takeDirty();
-      await this.store.replace(m.snapshot());
+      await this.store.replace(m.storedSnapshot());
       this.m = m;
+      this.applyGraphScope();
       this.runner = this.makeRunner();
       return { cases: m.count('cases') };
     }).then(r => { this.runner.kick(); return r; });
   }
+
+  /** Keep the graph for the top artists: their songs and the people, labels and distributors on them (never stored). */
+  private applyGraphScope() { setGraphScope(this.m, this.ctx(ENGINE_USER), topArtistIds(this.m)); }
+
+  /** Check once whether artists searched before V2.7.2 are alive (background, public records). */
+  checkLives() { return this.runner.checkLivesOfStarted(); }
 
   /** Resolves when no discovery job is running or queued (tests). */
   idle() { return this.runner.idle(); }

@@ -5,6 +5,7 @@ import { ARTIST_STATUS_INFO, GOONGOONALO_INFO, type ArtistStatus, type Goongoona
 import { useActions } from '../../components/actions';
 import { ProgressTrack, TaskCard } from '../../components/case-bits';
 import { useDiscovery } from '../../components/discovery/DiscoveryPanel';
+import { AddProfileButton } from '../../components/discovery/AddProfile';
 import { PlatformBadge, ProfileLink, handleOf } from '../../components/discovery/bits';
 import { GoongoonaloBadge, IdentityBadge } from '../../components/status';
 import { Badge, Button, Card, Empty, KeyVal, SkeletonRows, StageBadge } from '../../components/ui';
@@ -99,6 +100,10 @@ export function ProfilesTab({ d, onTab }: { d: CaseDetail; onTab: (t: string) =>
   const open = data.candidates.length;
   return (
     <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-sm text-ink-2">Search missed a profile? Add it by hand: pick the platform and paste the link.</p>
+        <AddProfileButton caseId={d.case.id} name={d.case.canonicalName} verified={verified} size="sm" />
+      </div>
       {verified.length ? (
         <div className="grid gap-3 md:grid-cols-2">
           {verified.map(v => (

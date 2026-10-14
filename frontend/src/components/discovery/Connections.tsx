@@ -49,7 +49,7 @@ export function PossibleConnections({ caseId, paths, onShow, onFind, finding }: 
                   <Button size="sm" variant="primary" onClick={() => open('verifyRouteDiscovery', { caseId, routeId: p.route!.id, preset: { path: p.steps.map(s => s.label).join(' → ') } })}>Verify route</Button>
                   <Button size="sm" variant="danger" onClick={() => open('rejectRoute', { caseId, routeId: p.route!.id })}>Reject route</Button>
                 </>}
-                {p.route && p.route.state !== 'Candidate' && <Link to={`/artists/${caseId}?tab=routes`}><Button size="sm">Route {p.route.id}: {p.route.state}</Button></Link>}
+                {p.route && p.route.state !== 'Candidate' && <Link to={`/artists/${caseId}?tab=claims`}><Button size="sm">Route {p.route.id}: {p.route.state}</Button></Link>}
                 {!p.route && <Button size="sm" variant="danger" onClick={() => open('rejectConnectionPath', { caseId, preset: { pathId: p.id } })}>Reject</Button>}
                 {onShow && <Button size="sm" variant="ghost" onClick={() => onShow(p.id)}>Open graph</Button>}
               </div>

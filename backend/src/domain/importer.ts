@@ -10,13 +10,14 @@ import { CREDIT_ROLES, IMPORT_CLASSES, type CreditRole, type ImportClass } from 
 import { openDuplicate, scanDuplicates } from './dedupe';
 import { findHeader, normDate, parseRoleCredits, splitArtists, type ColumnMap, type Field } from './importmap';
 import type { Model } from './model';
-import { audit, computePriority, evidenceChanged, newCaseRecord, notify, requirePerm, setStage, syncNextAction } from './ops';
+import { audit, computePriority, evidenceChanged, newCaseRecord, notify, requirePerm, setStage, syncNextAction, notUndone } from './ops';
 import { applyLeads, emptyOutcome, leadsForTracks } from './refresh';
-import { kindOf, reopenArtist, syncArtistStatuses } from './status';
+import { isVerified, kindOf, reopenArtist, statusEvent, syncArtistStatuses } from './status';
 import { syncRouteGraph, syncTrackGraph } from './graph';
-import { queueJob, searchBlocked } from './discovery/pipeline';
+import { queueJob, searchBlocked, syncDiscoveryState } from './discovery/pipeline';
+import { normalizeProfileUrl } from './discovery/normalize';
 import type { ArtistCase, Ctx, ImportBatch, ImportFormat, ImportRow, ImportSummary, Track } from './types';
-import { ISRC_RE, clean, nameKey, normIsrc } from './util';
+import { ISRC_RE, clean, nameKey, normIsrc, sha256Text } from './util';
 
 export const STANDARD_COLUMNS = ['artist_id', 'artist_name', 'artist_role', 'track_id', 'release_id', 'release_title', 'title', 'version', 'isrc', 'label', 'distributor', 'language', 'release_date', 'credits', 'claim_status', 'activity', 'profile_url'];
 /** An empty G Amplify standard file (header row only) to fill in by hand. */
@@ -208,8 +209,9 @@ function catalogueRecs(layout: Layout): Rec[] {
     return rec;
   });
 }
+/** Fingerprint of an imported row: SHA-256 of its fields (64 characters; the full text used to be stored, ~440 per song). */
 function rowSig(r: Rec): string {
-  return JSON.stringify([r.artistId, r.artistName, r.artistRole, r.moreLeads.length ? r.moreLeads : undefined, r.releaseId, r.title, r.version, r.isrc, r.label, r.distributor, r.language, r.releaseDate, r.credits, r.claimStatus, r.activity, r.profileUrl]);
+  return sha256Text(JSON.stringify([r.artistId, r.artistName, r.artistRole, r.moreLeads.length ? r.moreLeads : undefined, r.releaseId, r.title, r.version, r.isrc, r.label, r.distributor, r.language, r.releaseDate, r.credits, r.claimStatus, r.activity, r.profileUrl]));
 }
 function emptySummary(): ImportSummary {
   return {
@@ -287,7 +289,7 @@ export async function processImport(m: Model, ctx: Ctx, input: ImportInput, onSt
   const earlier = m.all('batches').filter(b => b.status === 'Processed' && (b.id === input.versionOfId || b.originalFilename === input.filename)).sort((a, b) => b.version - a.version || b.id.localeCompare(a.id))[0];
   if (earlier) { base.version = earlier.version + 1; base.versionOfId = earlier.id; }
   const batch = m.insert('batches', base);
-  if (format === 'Artist directory') { await processDirectory(m, ctx, batch, input, layout, onStep); return m.get('batches', batch.id)!; }
+  if (format === 'Artist directory') { await processDirectory(m, ctx, batch, input, layout, onStep, onProgress); return m.get('batches', batch.id)!; }
 
   await onStep('Validating');
   const parsed = format === 'G Amplify standard' ? standardRecs(layout.table) : { recs: catalogueRecs(layout), missingColumns: [] };
@@ -522,7 +524,7 @@ export async function processImport(m: Model, ctx: Ctx, input: ImportInput, onSt
       summary.claimChanges++;
       if (!row.classification) row.classification = 'Claim State Change';
       if (c.claimStatus === 'Approved') {
-        const sub = m.familyItems('claimEvents', c.id).filter(e => e.type === 'Submitted').pop();
+        const sub = notUndone(m.familyItems('claimEvents', c.id)).filter(e => e.type === 'Submitted').pop();
         const e = m.insert('claimEvents', { id: m.nextId('CE', 4), caseId: c.id, type: 'Backend Verified', date: ctx.now, profileId: rec.artistId || sub?.profileId || null, claimRequestId: sub?.claimRequestId ?? null, recipient: sub?.recipient ?? c.canonicalName, reviewerId: null, notes: `Reported by ${batch.id}`, evidence: `${batch.id} row ${rec.rowNumber}: claim_status=claimed`, actorId: ctx.userId, source: 'Import' });
         m.update('cases', c.id, { claimStatus: 'Completed' });
         audit(m, ctx, { caseId: c.id, entity: 'ClaimEvent', entityId: e.id, action: 'Backend claim verified by import', field: 'claimStatus', from: 'Approved', to: 'Completed', evidence: e.evidence });
@@ -535,7 +537,7 @@ export async function processImport(m: Model, ctx: Ctx, input: ImportInput, onSt
     }
     if (rec.activity) {
       const [kind, ref, date] = rec.activity.split('|').map(x => x.trim());
-      const already = m.familyItems('activationEvents', c.id).some(e => e.backendRef === ref && ref);
+      const already = notUndone(m.familyItems('activationEvents', c.id)).some(e => e.backendRef === ref && ref);
       if (!already) {
         summary.activationChanges++;
         if (!row.classification) row.classification = 'Activation State Change';
@@ -637,62 +639,189 @@ export async function processImport(m: Model, ctx: Ctx, input: ImportInput, onSt
   return m.get('batches', batch.id)!;
 }
 
-async function processDirectory(m: Model, ctx: Ctx, batch: ImportBatch, input: ImportInput, layout: Layout, onStep: StepFn) {
+/** Names of record labels, companies and rights holders ("… Pvt. Ltd.", "… Records", "… Music"): kept apart as Labels. */
+export const LABEL_NAME = /\b(pvt|private|ltd|limited|llp|llc|inc|corp|corporation|records|recordz|recording|recordings|entertainments?|productions?|studios?|films|media|audios?|videos?|cassettes?|digital|labels?|distribution|publishing|publishers|network|creations|enterprises?|telefilms?|company)\b|\bmusic$|^goongoonalo$/i;
+/** Placeholder credits that are no one ("Traditional", "Instrumental", "Chorus" …): set aside as rejected. */
+export const PLACEHOLDER_NAME = /^(traditional|folk|unknown|anonymous|public domain|various artists?|multiple artists|instrumentals?|chorus|choir|karaoke|group|children|kids)$/i;
+/** "Died 13 February 2016 in …", "(d. 16 April 2024)", "1912-1984" → "2016-02-13" / "2024-04-16" / "1984" (null when no date). */
+export function deathDateOf(text: string): string | null {
+  const months = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  const day = /(?:died|d\.)\s*(?:on\s*)?(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})/i.exec(text);
+  if (day) { const mi = months.indexOf(day[2].toLowerCase()); if (mi >= 0) return `${day[3]}-${String(mi + 1).padStart(2, '0')}-${day[1].padStart(2, '0')}`; }
+  const year = /(?:died|d\.)\s*(?:in\s*)?(\d{4})/i.exec(text) ?? /\b1[0-9]{3}\s*[-–]\s*((?:1[0-9]|20)[0-9]{2})\b/.exec(text);
+  return year ? year[1] : null;
+}
+
+/**
+ * Artist directory (Admin Studio export: one sheet per letter pair with Artist name, Social link, Confidence %, Link basis,
+ * Songs, Followers, Listeners, Verified, Core member, Song titles). Every row is one artist:
+ *  - the artist is found by exact name (or created), and keeps the directory facts (songs, audience, flags);
+ *  - each listed song title becomes a song credited to the artist (titles already on file are not repeated);
+ *  - a social link becomes a candidate profile in Evidence with its confidence and reason (a person verifies it);
+ *  - "Verified = Yes" means the artist is on Goongoonalo (a person's earlier answer is never overwritten);
+ *  - "n/a - deceased" asks the "passed away: continue or remove?" question; "not an individual" rejects the record.
+ */
+async function processDirectory(m: Model, ctx: Ctx, batch: ImportBatch, input: ImportInput, layout: Layout, onStep: StepFn, onProgress: ProgressFn) {
   const summary = batch.summary;
+  const dir = { profiles: 0, members: 0, deceased: 0, notIndividual: 0, labels: 0, placeholders: 0, noneFound: 0, core: 0, songs: 0 };
   await onStep('Validating');
-  const entries: { row: number; sheet: string; raw: Record<string, string>; name: string; link: string; conf: number | null; basis: string }[] = [];
+  const entries: { row: number; sheet: string; raw: Record<string, string>; name: string; link: string; links: string[]; conf: number | null; basis: string; songs: number; followers: number; listeners: number; verified: boolean; core: boolean; titles: string[] }[] = [];
   const sheets = input.sheets ?? [{ name: 'csv', rows: layout.table }];
+  const num = (v: string | undefined) => { const n = Number(String(v ?? '').replace(/,/g, '')); return Number.isFinite(n) ? Math.round(n) : 0; };
+  const yes = (v: string | undefined) => /^(yes|y|true|1)$/i.test(clean(v));
   for (const sh of sheets) {
     const rows = sh.rows;
     const hi = rows.slice(0, 12).findIndex(r => (r ?? []).some(v => clean(v).toLowerCase() === 'artist name'));
     if (hi < 0) continue;
     const head = (rows[hi] ?? []).map(v => clean(v).toLowerCase());
-    for (let i = hi + 1; i < rows.length; i++) {
+    // a second header row naming one column per platform under "Social link" (the verified-artists export)
+    const platformCols = (rows[hi + 1] ?? []).map((v, j) => ({ j, p: clean(v) })).filter(x => /^(instagram|facebook|x|youtube|spotify|apple music|jiosaavn|soundcloud|gaana|deezer|website|other)$/i.test(x.p));
+    for (let i = hi + (platformCols.length ? 2 : 1); i < rows.length; i++) {
       const r = rows[i] ?? [];
       const raw: Record<string, string> = {};
       head.forEach((h, j) => { if (h) raw[h] = clean(r[j]); });
-      if (!raw['artist name']) continue;
+      for (const x of platformCols) if (clean(r[x.j])) raw[`social link: ${x.p.toLowerCase()}`] = clean(r[x.j]);
+      const links = platformCols.flatMap(x => clean(r[x.j]).split(/\s+\|\s+/)).filter(u => /^https?:\/\//i.test(u));
+      const name = raw['artist name'];
+      if (!name) continue;
       const conf = raw['confidence %'] ? Number(raw['confidence %']) : null;
-      entries.push({ row: i + 1, sheet: sh.name, raw, name: raw['artist name'], link: raw['social link'] ?? '', conf: Number.isFinite(conf) ? conf : null, basis: raw['link basis'] ?? '' });
+      const titleCell = raw['song titles'] ?? raw['songs list'] ?? '';
+      const titles = /^no lead-artist songs found$/i.test(titleCell) ? [] : [...new Set(titleCell.split(/\s+\|\s+/).map(t => clean(t)).filter(Boolean))];
+      entries.push({
+        row: i + 1, sheet: sh.name, raw, name, link: links[0] ?? raw['social link'] ?? '', links, conf: Number.isFinite(conf) ? conf : null, basis: raw['link basis'] ?? '',
+        songs: num(raw.songs), followers: num(raw.followers), listeners: num(raw.listeners), verified: yes(raw.verified), core: yes(raw['core member']), titles,
+      });
     }
   }
   await onStep('Matching');
-  let accepted = 0, skipped = 0;
-  const created = new Set<string>();
+  let accepted = 0, skipped = 0, done = 0;
+  const created = new Set<string>(), updated = new Set<string>(), candidates = new Set<string>(), labels = new Set<string>(), notIndividual = new Set<string>();
+  const titlesOf = new Map<string, Set<string>>();
+  const knownTitles = (c: ArtistCase) => {
+    let set = titlesOf.get(c.id);
+    if (!set) { set = new Set(m.trackIdsOfCase(c.id).map(id => nameKey(m.get('tracks', id)?.title ?? ''))); titlesOf.set(c.id, set); }
+    return set;
+  };
   await onStep('Detecting changes');
   for (const e of entries) {
-    let c: ArtistCase | undefined = m.casesNamed(e.name)[0];
-    const isUrl = /^https?:\/\//i.test(e.link);
+    if (++done % 1000 === 0) await onProgress(done, entries.length);
+    let c: ArtistCase | undefined = m.casesNamed(e.name).find(x => !x.mergedIntoId) ?? m.casesNamed(e.name)[0];
+    if (c?.mergedIntoId) c = m.get('cases', m.canonical(c.id));
+    const isNew = !c;
     if (!c) {
-      c = newCaseRecord(m, ctx, { name: e.name, backendId: null, batchId: batch.id, identityStatus: 'Provisional' });
+      c = newCaseRecord(m, ctx, { name: e.name, backendId: null, batchId: batch.id, identityStatus: 'Provisional', kind: LABEL_NAME.test(e.name) || /not an individual/i.test(e.link) ? 'Label' : 'Artist' });
       created.add(c.id);
       audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Case created from directory', reason: `${batch.id} ${e.sheet} row ${e.row}` });
     }
-    let cls: ImportClass = created.has(c.id) ? 'New Artist' : 'Unchanged';
-    if (isUrl && !c.profileUrls.includes(e.link)) {
-      m.update('cases', c.id, { profileUrls: [...c.profileUrls, e.link] });
-      if (!m.byCase('routes', c.id).some(r => r.sourceUrl === e.link)) {
-        const strong = (e.conf ?? 0) >= 85;
-        const routeRow = m.insert('routes', { id: m.nextId('RT', 4), targetCaseId: c.id, trackId: null, collaboratorName: null, collaboratorCaseId: null, organisation: null, contactId: null, sourceUrl: e.link, evidence: `Directory research: ${e.basis || 'profile found'} (${e.conf ?? '?'}% match)`, confidence: e.conf ?? 50, state: strong ? 'Verified' : 'Candidate', ranking: 4, lastChecked: ctx.now, rejectionReason: null, ownerId: c.ownerId, origin: `Directory ${batch.id}`, path: null, pathId: null, createdAt: ctx.now });
-        syncRouteGraph(m, ctx, routeRow.id);
-        summary.newRoutes++;
-      }
-      cls = created.has(c.id) ? 'New Artist' : 'New Evidence (route)';
+    const changes: string[] = [];
+    // directory facts (a repeated name keeps the bigger numbers)
+    const prev = c.directory ?? null;
+    const facts = {
+      songs: Math.max(e.songs, prev?.batchId === batch.id ? prev.songs : 0), followers: Math.max(e.followers, prev?.batchId === batch.id ? prev.followers : 0), listeners: Math.max(e.listeners, prev?.batchId === batch.id ? prev.listeners : 0),
+      verified: e.verified || (prev?.batchId === batch.id && prev.verified), core: e.core || (prev?.batchId === batch.id && prev.core),
+      link: e.link, confidence: e.conf, basis: e.basis, batchId: batch.id, sheet: e.sheet, row: e.row,
+    };
+    m.update('cases', c.id, { directory: facts });
+    if (facts.core && !(prev?.batchId === batch.id && prev.core)) dir.core++;
+    // songs
+    const known = knownTitles(c);
+    let added = 0;
+    for (const title of e.titles) {
+      const key = nameKey(title);
+      if (!key || known.has(key)) continue;
+      known.add(key);
+      const t = m.insert('tracks', {
+        id: m.nextId('TR', 6), backendTrackId: `${batch.id}-S${String(summary.newSongs + 1).padStart(6, '0')}`, releaseId: null, title, version: '', isrc: '', label: '', distributor: '', language: c.language ?? '',
+        releaseDate: '', source: 'Artist directory', flags: ['ISRC missing', 'From the artist directory (title only)'], sig: '', firstSeen: ctx.now, lastSeen: ctx.now, firstBatchId: batch.id, lastBatchId: batch.id, history: [],
+      });
+      m.insert('credits', { id: m.nextId('CR', 6), trackId: t.id, caseId: c.id, personName: c.canonicalName, personBackendId: c.backendProfileIds[0] ?? null, role: 'Performer', isPrimary: true, source: 'Artist directory', sourceVersion: batch.id, firstSeen: ctx.now, lastSeen: ctx.now, status: 'Active', statusReason: null });
+      syncTrackGraph(m, ctx, t.id);
+      summary.newSongs++; summary.newCredits++; added++;
     }
-    if (/deceased/i.test(e.link) && c.lifecycleStage !== 'Closed') { m.update('cases', c.id, { closedReason: 'Deceased or historical figure (directory research)' }); setStage(m, ctx, c, 'Closed', 'Directory research: deceased or historical figure'); cls = 'Updated Metadata'; }
+    if (added) { changes.push(`${added} song${added === 1 ? '' : 's'}`); dir.songs += added; }
+    // the social link cell
+    const link = e.link.trim();
+    if (/^https?:\/\//i.test(link)) {
+      for (const url of e.links.length ? e.links : [link]) {
+        const norm = normalizeProfileUrl(url);
+        if (norm && !m.profileAt(c.id, null, norm.normalized)) {
+          const conf = e.conf ?? 50;
+          m.insert('profiles', {
+            id: m.nextId('PF', 4), caseId: c.id, collaboratorId: null, platform: norm.platform, url: norm.url, normalizedUrl: norm.normalized, displayName: norm.username ? `@${norm.username}` : c.canonicalName, username: norm.username,
+            title: '', description: e.basis, location: null, language: null, links: [], tracks: [], followers: e.followers || null, source: 'Artist directory', foundVia: [], discoveryStatus: 'FOUND', verificationStatus: 'UNREVIEWED',
+            evidenceScore: Math.max(0, Math.min(100, Math.round(conf))), strength: conf >= 85 ? 'STRONG' : conf >= 70 ? 'POSSIBLE' : 'WEAK',
+            matched: [`Artist directory research (${Math.round(conf)}% confidence): ${e.basis || 'profile found'}`], conflicts: conf < 70 ? ['Below 70%: a competing candidate exists or the name is common. Check before contacting.'] : [],
+            matchedSongs: [], otherCaseId: null, groupKey: null, groupLabel: null, changeOfProfileId: null, scoreAtReview: null, firstJobId: 'DIRECTORY', lastJobId: 'DIRECTORY', lastVersion: 0,
+            discoveredAt: ctx.now, lastCheckedAt: ctx.now, reviewedAt: null, reviewedBy: null, reviewNote: null, verifiedAt: null, verifiedBy: null, rejectionReason: null, demo: false,
+          });
+          if (!c.profileUrls.includes(norm.url)) m.update('cases', c.id, { profileUrls: [...m.get('cases', c.id)!.profileUrls, norm.url] });
+          candidates.add(c.id); dir.profiles++; summary.newRoutes++;
+          changes.push(`${norm.platform} profile to verify`);
+        }
+      }
+    } else if (/deceased/i.test(link)) {
+      const cur = m.get('cases', c.id)!;
+      if (cur.life?.status !== 'Deceased') {
+        m.update('cases', c.id, { life: { status: 'Deceased', deathDate: deathDateOf(e.basis), birthDate: null, label: c.canonicalName, description: e.basis || 'Directory research: deceased or historical figure', source: null, others: 0, checkedAt: ctx.now, decision: null, decidedBy: null, decidedAt: null } });
+        audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Checked: is the artist alive?', to: 'Passed away (artist directory)', reason: e.basis || 'Directory research', evidence: `${batch.id} ${e.sheet} row ${e.row}` });
+        syncDiscoveryState(m, ctx, c.id);
+        dir.deceased++; changes.push('passed away: decide');
+      }
+    } else if (/none found/i.test(link)) {
+      audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Directory research: no profile found', reason: e.basis || 'Researched, but no profile could be verified (does not mean none exists)' });
+      dir.noneFound++;
+    }
+    // a label or company (the researchers said "not an individual", or the name says so) → the Labels list, apart from
+    // artists; a placeholder credit ("Instrumental") is no one → set aside as rejected (both can be changed back)
+    const now0 = m.get('cases', c.id)!;
+    if (!isVerified(now0) && !now0.rejectedAt) {
+      if (PLACEHOLDER_NAME.test(e.name)) {
+        const reason = `Placeholder credit, not a person (“${e.name}”). Restore it if this is an artist.`;
+        m.update('cases', c.id, { rejectedAt: ctx.now, rejectedReason: reason, updatedAt: ctx.now });
+        audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Artist rejected', reason, result: 'Kept with the reason; not searched or contacted.' });
+        dir.placeholders++; changes.push('set aside: placeholder credit');
+      } else if (/not an individual/i.test(link) || LABEL_NAME.test(e.name)) {
+        if (now0.kind !== 'Label') {
+          m.update('cases', c.id, { kind: 'Label', updatedAt: ctx.now });
+          audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Artist type changed', field: 'kind', from: now0.kind, to: 'Label', reason: 'Artist directory: a label or company, not a person' });
+          changes.push('label');
+        }
+        (/not an individual/i.test(link) ? notIndividual : labels).add(c.id);
+      }
+    }
+    // "Verified = Yes": on Goongoonalo (only when nobody answered the question yet)
+    const cur = m.get('cases', c.id)!;
+    if (e.verified && cur.goongoonaloStatus === 'PENDING') {
+      m.update('cases', c.id, { goongoonaloStatus: 'GOONGOONALO', goongoonaloStatusAt: ctx.now, goongoonaloStatusBy: ctx.userId, updatedAt: ctx.now });
+      statusEvent(m, ctx, c.id, 'goongoonalo', 'PENDING', 'GOONGOONALO', 'Admin Studio: verified artist (artist directory)');
+      audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Goongoonalo status changed', field: 'goongoonaloStatus', from: 'Pending', to: 'Goongoonalo', reason: `Admin Studio: verified artist (${batch.id} ${e.sheet} row ${e.row})` });
+      dir.members++; changes.push('on Goongoonalo');
+    }
+    if (!isNew && changes.length) updated.add(c.id);
+    const cls: ImportClass = isNew ? 'New Artist' : changes.length ? 'Updated Metadata' : 'Unchanged';
     const status: ImportRow['status'] = cls === 'Unchanged' ? 'Skipped' : 'Accepted';
     if (status === 'Accepted') accepted++; else skipped++;
     summary.classes[cls]++;
-    m.insert('importRows', { id: m.nextId('IR', 6), batchId: batch.id, rowNumber: e.row, raw: e.raw, mapped: { artists: e.name, profileUrl: e.link }, status, classification: cls, reason: status === 'Skipped' ? 'Nothing new for this artist' : null, ownerId: null, exceptionStatus: null, resolution: null, resolvedAt: null, caseIds: [c.id], trackId: null });
+    m.insert('importRows', { id: m.nextId('IR', 6), batchId: batch.id, rowNumber: e.row, raw: e.raw, mapped: { artists: e.name, profileUrl: e.link, songs: String(e.songs) }, status, classification: cls, reason: status === 'Skipped' ? 'Nothing new for this artist' : changes.join(', ') || null, ownerId: null, exceptionStatus: null, resolution: null, resolvedAt: null, caseIds: [c.id], trackId: null });
   }
   await onStep('Updating cases');
+  for (const id of candidates) syncDiscoveryState(m, ctx, id);
   summary.newArtistIds = [...created];
+  summary.updatedArtistIds = [...updated];
   summary.artistsCreated = created.size;
-  summary.artistsFound = entries.length;
+  summary.artistsUpdated = updated.size;
+  summary.artistsFound = new Set(entries.map(e => nameKey(e.name))).size;
+  dir.labels = labels.size; dir.notIndividual = notIndividual.size;
+  summary.directory = dir;
+  // the same person under two spellings (“P Jayachandran” / “P. Jayachandran”) goes to Deduplicate; nothing is merged here
+  const dups = scanDuplicates(m, ctx, [...created]);
+  summary.possibleDuplicates = dups.length; summary.duplicateIds = dups.map(d => d.id);
+  if (dir.profiles) summary.warnings.push(`${dir.profiles} social link(s) from the directory were added as profiles to verify (Verified Artists → In progress → Needs review). Messages only go to verified profiles.`);
   await onStep('Creating tasks');
   m.update('batches', batch.id, { rowCount: entries.length, acceptedCount: accepted, skippedCount: skipped, quarantinedCount: 0, summary });
-  syncArtistStatuses(m, ctx, created);
-  audit(m, ctx, { caseId: null, entity: 'ImportBatch', entityId: batch.id, action: 'Directory processed', to: `${entries.length} rows`, result: `${summary.newRoutes} profile routes · ${created.size} new artists` });
-  notify(m, ctx, 'Import', `${batch.id} directory processed: ${summary.newRoutes} profile links added as routes.`, null);
+  syncArtistStatuses(m, ctx, new Set([...created, ...updated]));
+  for (const id of [...created, ...updated]) { const c = m.get('cases', id); if (c) { computePriority(m, c, ctx.today); syncNextAction(m, id); } }
+  audit(m, ctx, { caseId: null, entity: 'ImportBatch', entityId: batch.id, action: 'Directory processed', to: `${entries.length} rows`, result: `${created.size} new artists · ${summary.newSongs} songs · ${dir.profiles} profiles to verify · ${dir.members} on Goongoonalo · ${dir.deceased} passed away · ${dir.notIndividual} not individuals` });
+  notify(m, ctx, 'Import', `${batch.id} artist directory: ${created.size} new artists, ${summary.newSongs} songs, ${dir.profiles} profiles to verify, ${dir.members} on Goongoonalo.`, null);
   await onStep('Complete');
 }

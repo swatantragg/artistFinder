@@ -93,7 +93,10 @@ function Uploader() {
           {file ? (
             <p className="break-all text-sm text-ink"><FileSpreadsheet size={16} className="mr-1 inline" /><b>{file.name}</b> · {num(Math.round(file.size / 1024))} KB · <span className="text-muted underline">choose another</span></p>
           ) : (
-            <p className="text-sm text-ink-2"><b className="text-ink">Drop the export file here</b> or click to choose it</p>
+            <>
+              <p className="text-sm text-ink-2"><b className="text-ink">Drop the export file here</b> or click to choose it</p>
+              <p className="mt-1 text-xs text-muted">Media Library export (.csv), a song sheet with Track Name and Artist Name, or the artist directory (.xlsx: Artist name, Social link, Songs, Verified, Core member, Song titles; every sheet is read)</p>
+            </>
           )}
           <input ref={input} type="file" accept=".csv,.xlsx,.xls" hidden onChange={e => { pick(e.target.files?.[0]); e.target.value = ''; }} />
         </div>

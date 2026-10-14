@@ -1,5 +1,5 @@
 // Small discovery widgets shared by the dossier, the Artist Discovery page, the queue and import results.
-import { Building2, ExternalLink, Globe, Loader2, Music2 } from 'lucide-react';
+import { Building2, ExternalLink, Globe, Loader2, Music2, Users } from 'lucide-react';
 import { siApplemusic, siDeezer, siFacebook, siInstagram, siSoundcloud, siSpotify, siX, siYoutube } from 'simple-icons';
 import { Badge, cx } from '../ui';
 import { num } from '../../lib/format';
@@ -10,10 +10,10 @@ const BRAND: Record<string, { path: string; hex: string }> = {
   Spotify: siSpotify, YouTube: siYoutube, Instagram: siInstagram, Facebook: siFacebook, SoundCloud: siSoundcloud, X: siX, 'Apple Music': siApplemusic, Deezer: siDeezer,
 };
 const FALLBACK: Record<string, { Icon: typeof Globe; hex: string | null }> = {
-  JioSaavn: { Icon: Music2, hex: '2BC5B4' }, Gaana: { Icon: Music2, hex: 'E72C30' }, Website: { Icon: Globe, hex: null }, 'Label website': { Icon: Building2, hex: null },
+  JioSaavn: { Icon: Music2, hex: '2BC5B4' }, Gaana: { Icon: Music2, hex: 'E72C30' }, Website: { Icon: Globe, hex: null }, 'Label website': { Icon: Building2, hex: null }, 'Go-between': { Icon: Users, hex: null },
 };
-const SIZES = { sm: [24, 15], md: [32, 18], lg: [40, 22] } as const;
-export function PlatformBadge({ platform, size = 'md' }: { platform: string; size?: 'sm' | 'md' | 'lg' }) {
+const SIZES = { xs: [20, 13], sm: [24, 15], md: [32, 18], lg: [40, 22] } as const;
+export function PlatformBadge({ platform, size = 'md' }: { platform: string; size?: keyof typeof SIZES }) {
   const [box, icon] = SIZES[size];
   const brand = BRAND[platform];
   const fb = FALLBACK[platform] ?? { Icon: Globe, hex: null };
@@ -31,7 +31,7 @@ export function MatchPill({ score }: { score: number }) {
   const tone = score >= 80 ? 'green' : score >= 50 ? 'blue' : 'orange';
   return <Badge tone={tone} title="How well the profile matches the artist (name, handle, platform, songs). A person still decides.">{score}% match</Badge>;
 }
-const DISC_TONE: Record<string, 'neutral' | 'blue' | 'orange' | 'green' | 'red' | 'gold'> = { 'Not started': 'neutral', Queued: 'blue', Searching: 'blue', 'Needs verification': 'gold', Verified: 'green', 'No candidate': 'orange', Failed: 'red' };
+const DISC_TONE: Record<string, 'neutral' | 'blue' | 'orange' | 'green' | 'red' | 'gold'> = { 'Not started': 'neutral', Queued: 'blue', Searching: 'blue', 'Needs verification': 'gold', 'Needs decision': 'orange', Verified: 'green', 'No candidate': 'orange', Failed: 'red' };
 export function DiscoveryChip({ status, extra }: { status: string; extra?: string }) {
   if (status === 'Not started') return <span className="whitespace-nowrap text-sm text-muted">Not started</span>;
   return (

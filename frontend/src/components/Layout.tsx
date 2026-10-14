@@ -1,22 +1,25 @@
 // App shell: sidebar navigation, top bar (global search, notifications, signed-in person) and toasts.
 import {
-  Activity, BadgeCheck, Bell, CheckCircle2, ChevronDown, CopyCheck, FileUp, LayoutDashboard, Loader2, LogOut, Menu as MenuIcon, Search, Settings, UserCog, Users, X, XCircle, Info,
+  Activity, BadgeCheck, ListChecks, Bell, MessageCircle, CheckCircle2, ChevronDown, CopyCheck, FileUp, LayoutDashboard, Loader2, LogOut, Menu as MenuIcon, Monitor, Moon, Search, Settings, Sun, Users, X, XCircle, Info,
 } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { useApp, useDebounced, useQuery } from '../lib/app';
 import { fmtAgo, num } from '../lib/format';
+import { setTheme, usePrefs, type Theme } from '../lib/prefs';
 import { VERSION } from '../lib/version';
 import { Avatar, Badge, cx } from './ui';
 import { WhatsNew, showWhatsNew } from './WhatsNew';
 
-type BadgeKey = 'needsReview' | 'dedupe' | 'goongoonaloPending' | 'exceptions';
-/** Five places, all organised around the artist (v2 §10). Tasks, routes, claims and activation live inside each artist. */
+type BadgeKey = 'needsReview' | 'verifiedTodo' | 'dedupe' | 'goongoonaloPending' | 'messages' | 'exceptions';
+/** Seven places, all organised around the artist (v2 §10). Tasks, routes, claims and activation live inside each artist. */
 const NAV: { to: string; label: string; icon: ReactNode; badge?: BadgeKey; hint: string }[] = [
   { to: '/', label: 'Dashboard', icon: <LayoutDashboard size={18} />, hint: 'Overview and your next actions' },
-  { to: '/artists', label: 'Artists', icon: <Users size={18} />, badge: 'needsReview', hint: 'Every artist: find, verify, review' },
+  { to: '/artists', label: 'Artists', icon: <Users size={18} />, hint: 'Artists not started yet: click Find artist' },
   { to: '/deduplicate', label: 'Deduplicate', icon: <CopyCheck size={18} />, badge: 'dedupe', hint: 'Possible duplicate artists' },
-  { to: '/verified', label: 'Verified Artists', icon: <BadgeCheck size={18} />, badge: 'goongoonaloPending', hint: 'Verified artists and their Goongoonalo status' },
+  { to: '/verified', label: 'Verified Artists', icon: <BadgeCheck size={18} />, badge: 'verifiedTodo', hint: 'Artists being verified (In progress) and verified artists' },
+  { to: '/messages', label: 'Messages', icon: <MessageCircle size={18} />, badge: 'messages', hint: 'Message verified artists on Instagram, X and Facebook; follow-ups and greetings' },
+  { to: '/status', label: 'Status', icon: <ListChecks size={18} />, hint: 'Where each artist stands: claims, members, greetings' },
   { to: '/imports', label: 'Imports', icon: <FileUp size={18} />, badge: 'exceptions', hint: 'Upload exports, see what changed' },
 ];
 
@@ -36,10 +39,7 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
         <p className="px-3 pt-6 text-2xs leading-snug text-nav-muted">Upload a file → open an artist → <b className="font-medium text-lavender">Find artist</b> → verify. The software remembers.</p>
       </div>
       <div className="border-t border-white/10 px-2.5 py-2.5">
-        <NavLink to="/settings" onClick={onNavigate} className={({ isActive }) => cx('flex items-center gap-3 rounded-lg px-3 py-2 text-sm', isActive ? 'bg-nav-active font-medium text-white' : 'hover:bg-nav-2 hover:text-white')}>
-          <Settings size={18} className="opacity-80" />Settings
-        </NavLink>
-        <p className="px-3 pt-2 text-2xs leading-snug text-nav-muted">Saved in PostgreSQL · {meta?.discoveryBlocked ? 'Find artist is off' : 'live artist search'}</p>
+        <p className="px-3 text-2xs leading-snug text-nav-muted">Settings are in your profile menu (top right). Saved in PostgreSQL · {meta?.discoveryBlocked ? 'Find artist is off' : 'live artist search'}</p>
       </div>
     </nav>
   );
@@ -48,7 +48,7 @@ function Sidebar({ onNavigate }: { onNavigate?: () => void }) {
 function NavItem({ n, onNavigate }: { n: (typeof NAV)[number]; onNavigate?: () => void }) {
   const { meta } = useApp();
   const count = n.badge ? meta?.badges[n.badge] ?? 0 : 0;
-  const searching = n.to === '/artists' && (meta?.badges.searching ?? 0) > 0;
+  const searching = n.to === '/verified' && (meta?.badges.searching ?? 0) > 0;
   return (
     <li title={n.hint}>
       <NavLink to={n.to} end={n.to === '/'} onClick={onNavigate}
@@ -56,7 +56,7 @@ function NavItem({ n, onNavigate }: { n: (typeof NAV)[number]; onNavigate?: () =
         <span className="opacity-85">{n.icon}</span>
         <span className="flex-1">{n.label}</span>
         {searching && <Loader2 size={14} className="animate-spin text-lavender" aria-label="Searching" />}
-        {count > 0 && <span className={cx('min-w-6 rounded-full px-1.5 text-center text-2xs font-semibold tnum', n.badge === 'needsReview' || n.badge === 'dedupe' ? 'bg-lavender text-black' : 'bg-white/10 text-nav-text')}>{num(count)}</span>}
+        {count > 0 && <span className={cx('min-w-6 rounded-full px-1.5 text-center text-2xs font-semibold tnum', n.badge === 'verifiedTodo' || n.badge === 'dedupe' ? 'bg-lavender text-black' : 'bg-white/10 text-nav-text')}>{num(count)}</span>}
       </NavLink>
     </li>
   );
@@ -80,7 +80,7 @@ function JobWatcher() {
     if (changed) refresh();
   }, [data, toast, refresh]);
   if (!data?.active) return null;
-  return <Link to="/artists?status=SEARCHING" className="mr-1 hidden items-center gap-1.5 rounded-full border border-[var(--t-blue-bd)] px-3 py-1 text-xs text-[var(--t-blue)] sm:inline-flex"><Loader2 size={13} className="animate-spin" />Searching {data.active}</Link>;
+  return <Link to="/verified?view=progress&status=SEARCHING" className="mr-1 hidden items-center gap-1.5 rounded-full border border-[var(--t-blue-bd)] px-3 py-1 text-xs text-[var(--t-blue)] sm:inline-flex"><Loader2 size={13} className="animate-spin" />Searching {data.active}</Link>;
 }
 
 function GlobalSearch() {
@@ -103,7 +103,7 @@ function GlobalSearch() {
   const go = (r: (typeof results)[number]) => {
     setOpen(false); setQ(''); ref.current?.blur();
     if (r.type === 'Contact' && !r.caseId) navigate('/routes?tab=contacts');
-    else if (r.caseId) navigate(`/artists/${r.caseId}${r.type === 'Song' ? '?tab=songs' : r.type === 'Route' ? '?tab=routes' : ''}`);
+    else if (r.caseId) navigate(`/artists/${r.caseId}${r.type === 'Song' ? '?tab=songs' : r.type === 'Route' ? '?tab=claims' : ''}`);
   };
   return (
     <div className="relative min-w-0 flex-1 md:max-w-[560px]">
@@ -185,39 +185,66 @@ function Notifications() {
   );
 }
 
+/** Light, dark or the system's theme: one click, remembered by this browser. */
+export function ThemeSwitch() {
+  const { theme } = usePrefs();
+  const opts: { id: Theme; label: string; icon: ReactNode }[] = [{ id: 'light', label: 'Light', icon: <Sun size={16} /> }, { id: 'dark', label: 'Dark', icon: <Moon size={16} /> }, { id: 'system', label: 'System', icon: <Monitor size={16} /> }];
+  return (
+    <div role="radiogroup" aria-label="Theme" className="grid grid-cols-3 gap-1.5">
+      {opts.map(o => (
+        <button key={o.id} type="button" role="radio" aria-checked={theme === o.id} onClick={() => setTheme(o.id)}
+          className={cx('flex items-center justify-center gap-1.5 rounded-lg border px-2 py-2 text-sm', theme === o.id ? 'border-accent bg-accent-soft font-medium text-ink' : 'border-line-strong text-ink-2 hover:bg-hover')}>
+          {o.icon}{o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/** Your profile: the first name in the top bar; open it for role, email, theme, Settings and Sign out. */
 function UserMenu() {
   const { me, signOut } = useApp();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
+  const { pathname } = useLocation();
+  useEffect(() => { setOpen(false); }, [pathname]);   // going to another page closes the menu
   useEffect(() => {
     if (!open) return;
     const close = (e: MouseEvent) => { if (!ref.current?.contains(e.target as Node)) setOpen(false); };
+    const esc = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
     document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
+    document.addEventListener('keydown', esc);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', esc); };
   }, [open]);
+  const first = me.name.trim().split(/\s+/)[0] || me.name;
   return (
     <div ref={ref} className="relative">
-      <button type="button" onClick={() => setOpen(o => !o)} aria-label="Account" className="flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-hover">
+      <button type="button" onClick={() => setOpen(o => !o)} aria-label="Your profile" aria-expanded={open} className="flex items-center gap-2 rounded-lg px-1.5 py-1 hover:bg-hover">
         <Avatar name={me.name} size={32} />
-        <span className="hidden text-left leading-tight md:block">
-          <span className="block text-sm font-medium text-ink">{me.name}</span>
-          <span className="block text-2xs text-muted">{me.role}</span>
-        </span>
-        <ChevronDown size={14} className="text-muted" />
+        <span className="hidden text-sm font-medium text-ink sm:block">{first}</span>
+        <ChevronDown size={14} className={cx('text-muted transition-transform', open && 'rotate-180')} />
       </button>
       {open && (
-        <div className="fadein absolute right-0 top-12 z-40 w-[290px] max-w-[calc(100vw-24px)] rounded-xl border border-line bg-surface py-1 shadow-[var(--shadow-lg)]">
-          <div className="flex items-center gap-2.5 px-3 py-2.5">
-            <Avatar name={me.name} size={36} />
-            <span className="min-w-0 flex-1 leading-tight">
-              <span className="block truncate text-sm font-medium text-ink">{me.name}</span>
-              <span className="block truncate text-xs text-muted">{me.email}</span>
-              <span className="block text-2xs text-muted">{me.role}</span>
+        <div className="fadein absolute right-0 top-12 z-40 w-[340px] max-w-[calc(100vw-24px)] rounded-xl border border-line bg-surface py-2 shadow-[var(--shadow-lg)]">
+          <div className="flex items-start gap-3 px-4 py-2">
+            <Avatar name={me.name} size={42} />
+            <span className="min-w-0 flex-1 leading-snug">
+              <span className="block truncate text-base font-semibold text-ink">{me.name}</span>
+              <span className="mt-0.5 block"><Badge tone="violet">{me.role}</Badge></span>
+              <span className="mt-1 block break-all text-sm text-muted">{me.email}</span>
             </span>
           </div>
-          <div className="my-1 border-t border-line" />
-          <Link to="/settings" onClick={() => setOpen(false)} className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-ink hover:bg-hover"><UserCog size={16} className="text-muted" />Account and people</Link>
-          <button type="button" onClick={() => { setOpen(false); signOut(); }} className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-ink hover:bg-hover"><LogOut size={16} className="text-muted" />Sign out</button>
+          <div className="my-2 border-t border-line" />
+          <div className="px-4">
+            <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-muted">Theme</p>
+            <ThemeSwitch />
+          </div>
+          <div className="my-2 border-t border-line" />
+          <button type="button" onClick={() => { setOpen(false); navigate('/settings'); }} className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-base text-ink hover:bg-hover">
+            <Settings size={18} className="text-muted" /><span className="flex-1">Settings<span className="block text-xs text-muted">Text size, password, people and roles, discovery</span></span>
+          </button>
+          <button type="button" onClick={() => { setOpen(false); signOut(); }} className="flex w-full items-center gap-3 px-4 py-2.5 text-left text-base text-ink hover:bg-hover"><LogOut size={18} className="text-muted" />Sign out</button>
         </div>
       )}
     </div>

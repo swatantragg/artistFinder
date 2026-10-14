@@ -2,7 +2,9 @@
 import { ENGINE_USER, rescoreOpenCandidates } from './discovery/pipeline';
 import { syncContactGraph, syncRouteGraph, syncTrackGraph } from './graph';
 import type { Model } from './model';
-import { deriveArtistStatus, isVerified, kindOf } from './status';
+import { deriveArtistStatus, isVerified, kindOf, syncArtistStatus } from './status';
+import { LABEL_NAME, PLACEHOLDER_NAME } from './importer';
+import { audit } from './ops';
 import type { Role } from './constants';
 import type { ArtistCase, Ctx } from './types';
 
@@ -54,6 +56,23 @@ export function upgradeWorkspace(m: Model, ctx: Ctx): string[] {
     for (const id of cases) if (m.get('cases', id)) n += rescoreOpenCandidates(m, ctx, id);
     m.setMeta('upgrade:discovery-v2.1', 'done');
     notes.push(`artist-profile match % (${n} candidate profile${n === 1 ? '' : 's'} of ${cases.size} artist${cases.size === 1 ? '' : 's'} scored again)`);
+  }
+  // v2.7.2: labels are kept apart from artists (their own list) instead of being rejected. Records the artist directory set
+  // aside as "label or company" / "not an individual" come back as Labels; label names still listed as artists move too.
+  if (m.getMeta('upgrade:labels-v2.7.2') !== 'done' && m.count('cases') > 0) {
+    let moved = 0;
+    for (const c of m.all('cases')) {
+      if (c.mergedIntoId || c.kind === 'Label' || isVerified(c) || PLACEHOLDER_NAME.test(c.canonicalName)) continue;   // "Traditional" stays set aside
+      const setAside = !!c.rejectedAt && /^(Looks like a label or company|Not an individual \(artist directory\)|Placeholder credit, not a person \(“Goongoonalo”\))/.test(c.rejectedReason ?? '');
+      const byName = !c.rejectedAt && LABEL_NAME.test(c.canonicalName);
+      if (!setAside && !byName) continue;
+      m.update('cases', c.id, { kind: 'Label', ...(setAside ? { rejectedAt: null, rejectedReason: null } : {}), updatedAt: ctx.now });
+      audit(m, ctx, { caseId: c.id, entity: 'ArtistCase', entityId: c.id, action: 'Artist type changed', field: 'kind', from: c.kind, to: 'Label', reason: setAside ? 'Labels have their own list now (no longer rejected)' : 'A label or company name: kept apart from artists' });
+      syncArtistStatus(m, ctx, c.id, 'Moved to Labels');
+      moved++;
+    }
+    m.setMeta('upgrade:labels-v2.7.2', 'done');
+    if (moved) notes.push(`${moved} label/company record${moved === 1 ? '' : 's'} moved to the Labels list`);
   }
   return notes;
 }

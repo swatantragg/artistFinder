@@ -9,6 +9,8 @@ import { addDays, daysBetween } from './util';
 
 export class RuleError extends Error {}
 export const rule = (msg: string) => new RuleError(msg);
+/** Records that still count: contact attempts, claim events and messages a person undid stay in the history only. */
+export const notUndone = <T extends { undoneAt?: string | null }>(xs: T[]): T[] => xs.filter(x => !x.undoneAt);
 
 // ---------------------------------------------------------------------------
 // Permissions (role-aware UI; contact data can later be restricted the same way)
@@ -26,6 +28,7 @@ export const PERMISSIONS: Record<string, Role[]> = {
   manageUsers: ['System Owner', 'Admin'],
   managePasswords: ['System Owner'],
   resetWorkspace: ['System Owner'],
+  messageSettings: ['System Owner', 'Admin'],
 };
 export function can(m: Model, userId: string, perm: string): boolean {
   const roles = PERMISSIONS[perm];
@@ -125,8 +128,9 @@ export function openTask(m: Model, ctx: Ctx, c: ArtistCase, spec: TaskSpec, opts
   return t;
 }
 export function finishTask(m: Model, ctx: Ctx, t: Task, status: 'Completed' | 'Cancelled', result: string, nextAction?: string | null) {
+  const before = t.status;   // read before the update changes t
   m.update('tasks', t.id, { status, result, completedAt: ctx.now, nextAction: nextAction ?? t.nextAction });
-  audit(m, ctx, { caseId: t.caseId, entity: 'Task', entityId: t.id, action: status === 'Completed' ? 'Task completed' : 'Task cancelled', field: 'status', from: t.status, to: status, result, next: nextAction ?? null });
+  audit(m, ctx, { caseId: t.caseId, entity: 'Task', entityId: t.id, action: status === 'Completed' ? 'Task completed' : 'Task cancelled', field: 'status', from: before, to: status, result, next: nextAction ?? null });
   syncNextAction(m, t.caseId);
 }
 /** Close open tasks of the given kinds (or all) with an outcome, e.g. when a workflow step is done. */

@@ -138,6 +138,13 @@
 }
 
 html, body, #root { height: 100%; }
+/* Text (and everything sized in rem) grows with the screen: phones and tablets 16px, laptops 17px, desktops 18px,
+   very large screens 20px. Media queries use the browser's default size, so this never feeds back into them. */
+/* The person's text size (Settings → Display, five steps) scales it: --text-scale is set by lib/prefs.ts. */
+html { font-size: calc(16px * var(--text-scale, 1)); }
+@media (min-width: 1280px) { html { font-size: calc(17px * var(--text-scale, 1)); } }
+@media (min-width: 1600px) { html { font-size: calc(18px * var(--text-scale, 1)); } }
+@media (min-width: 2200px) { html { font-size: calc(20px * var(--text-scale, 1)); } }
 body {
   margin: 0;
   background: var(--bg);
